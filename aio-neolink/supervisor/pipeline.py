@@ -65,7 +65,7 @@ class SupervisorOptions:
     rtsp_host: str = "127.0.0.1"
     rtsp_port: int = 8554
     restart_backoff: float = 5.0     # min seconds between full process restarts
-    startup_grace: float = 25.0      # seconds after (re)start before probes count as failures
+    startup_grace: float = 30.0      # seconds after (re)start before probes count as failures
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +80,10 @@ async def _probe_rtp(host: str, port: int, stream_name: str, timeout: float) -> 
 
     This catches the exact failure mode from the original incident: Neolink's RTSP
     server responding to OPTIONS/DESCRIBE but not sending any RTP after PLAY.
+
+    The entire exchange is bounded by a single outer asyncio.wait_for so no
+    individual step can stall indefinitely.  Individual reads have no per-call
+    timeout; the outer cap is the only safety net.
     """
     url = f"rtsp://{host}:{port}/{stream_name}"
     try:
@@ -89,36 +93,37 @@ async def _probe_rtp(host: str, port: int, stream_name: str, timeout: float) -> 
     except (OSError, asyncio.TimeoutError) as exc:
         return False, f"connect failed: {exc}"
 
-    try:
+    # Shared read buffer — never lose bytes between RTSP method calls.
+    _buf = bytearray()
+
+    async def _read_response() -> str:
+        """Read RTSP response headers (up to blank line); leave leftover bytes in _buf."""
+        while b"\r\n\r\n" not in _buf:
+            chunk = await reader.read(4096)
+            if not chunk:
+                raise ConnectionError("connection closed")
+            _buf.extend(chunk)
+        hdr_end = _buf.index(b"\r\n\r\n") + 4
+        hdrs = bytes(_buf[:hdr_end])
+        del _buf[:hdr_end]
+        return hdrs.decode(errors="replace")
+
+    async def _discard_body(headers: str) -> None:
+        """Drain response body (Content-Length bytes) so the buffer stays clean."""
+        cl = 0
+        for line in headers.splitlines():
+            if line.lower().startswith("content-length:"):
+                cl = int(line.split(":", 1)[1].strip())
+                break
+        while len(_buf) < cl:
+            chunk = await reader.read(4096)
+            if not chunk:
+                break
+            _buf.extend(chunk)
+        del _buf[:cl]
+
+    async def _run_probe() -> tuple[bool, str]:
         cseq = 0
-        _buf = bytearray()   # shared read buffer so we never lose bytes between calls
-
-        async def _read_response() -> str:
-            """Read RTSP response headers (up to blank line) into _buf, return headers only."""
-            while b"\r\n\r\n" not in _buf:
-                chunk = await asyncio.wait_for(reader.read(4096), timeout=8.0)
-                if not chunk:
-                    raise ConnectionError("connection closed")
-                _buf.extend(chunk)
-            # Split off exactly the headers; keep leftover bytes (body or next response).
-            hdr_end = _buf.index(b"\r\n\r\n") + 4
-            hdrs = bytes(_buf[:hdr_end])
-            del _buf[:hdr_end]
-            return hdrs.decode(errors="replace")
-
-        async def _discard_body(headers: str) -> None:
-            """Drain the response body (Content-Length) so the buffer is clean."""
-            cl = 0
-            for line in headers.splitlines():
-                if line.lower().startswith("content-length:"):
-                    cl = int(line.split(":", 1)[1].strip())
-                    break
-            while len(_buf) < cl:
-                chunk = await asyncio.wait_for(reader.read(4096), timeout=8.0)
-                if not chunk:
-                    break
-                _buf.extend(chunk)
-            del _buf[:cl]
 
         async def _send(method: str, req_url: str = "", extra_headers: dict | None = None) -> str:
             nonlocal cseq
@@ -154,7 +159,7 @@ async def _probe_rtp(host: str, port: int, stream_name: str, timeout: float) -> 
                 cl = int(line.split(":", 1)[1].strip())
                 break
         while len(_buf) < cl:
-            chunk = await asyncio.wait_for(reader.read(4096), timeout=8.0)
+            chunk = await reader.read(4096)
             if not chunk:
                 break
             _buf.extend(chunk)
@@ -205,23 +210,28 @@ async def _probe_rtp(host: str, port: int, stream_name: str, timeout: float) -> 
             return False, f"PLAY failed: {resp[:120]}"
 
         # Wait for interleaved RTP data.  Any byte arriving means frames are flowing.
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
             # Check the shared buffer first (might already have bytes from PLAY response).
             if _buf:
                 return True, ""
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - loop.time()
             try:
-                byte = await asyncio.wait_for(reader.read(1), timeout=min(remaining, 2.0))
+                byte = await asyncio.wait_for(reader.read(1), timeout=min(remaining, 1.0))
                 if byte:
                     return True, ""
             except asyncio.TimeoutError:
                 continue
 
-        return False, f"no RTP data within {timeout:.0f}s (stream hung)"
+        return False, f"no RTP data within {timeout:.0f}s (stream may be hung)"
 
+    try:
+        # Single outer cap: (timeout + 5) s covers the RTSP handshake + RTP wait.
+        # No per-call read timeouts needed; this is the only safety net.
+        return await asyncio.wait_for(_run_probe(), timeout=timeout + 5)
     except asyncio.TimeoutError:
-        return False, "RTSP exchange timed out"
+        return False, f"RTSP probe timed out after {timeout + 5:.0f}s"
     except Exception as exc:  # noqa: BLE001
         return False, f"probe error: {exc}"
     finally:
