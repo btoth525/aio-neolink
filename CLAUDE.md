@@ -200,8 +200,8 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
 - **Watchdog restart backoff** (`restart_backoff`, default 5s) prevents restart loops —
   don't remove it.
 - **Licensing:** Neolink is GPL-3.0. Keep this repo GPL-3.0-compatible.
-- **Placeholder strings:** `YOUR_GITHUB_USERNAME` / `YOUR NAME` appear in
-  `config.yaml`, `repository.yaml`, `build.yaml`, `README.md` — replace before publishing.
+- **Placeholders:** all replaced with the real owner (`btoth525`) across `config.yaml`,
+  `repository.yaml`, `build.yaml`, and `README.md`. Nothing left to fill in.
 
 ---
 
