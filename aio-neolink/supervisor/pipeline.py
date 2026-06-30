@@ -43,8 +43,13 @@ log = logging.getLogger("aio-neolink.pipeline")
 
 NEOLINK_BIN = os.environ.get("NEOLINK_BIN", "/usr/local/bin/neolink")
 
-# Seconds to wait for at least one RTP byte during a probe.
-_PROBE_TIMEOUT = 12.0
+# Seconds to wait for at least one RTP byte during a probe. This must tolerate a
+# *cold* start: when our probe is the only RTSP client, Neolink pulls video from the
+# camera only on connect, and the first keyframe on the main stream can take a while.
+# A successful probe returns the instant the first byte arrives, so a larger ceiling
+# costs nothing in the healthy case and only avoids false "hung" verdicts on slow
+# keyframe starts.
+_PROBE_TIMEOUT = 20.0
 
 
 @dataclass
