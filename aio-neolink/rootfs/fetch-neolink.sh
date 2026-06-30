@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# DEPRECATED / UNUSED as of v0.1.6.
+# ---------------------------------------------------------------------------
+# The Dockerfile no longer calls this script. We now BUILD Neolink from source
+# (commit-pinned, version 0.6.3-rc.3) in a builder stage, because the newest
+# *released* binary is only rc.2 and that release stutters/hangs on recent Reolink
+# firmware. This script is kept only as a reference for the download-a-release
+# approach (e.g. if you later publish your own fork's release assets).
+# ---------------------------------------------------------------------------
+#
 # Download the QuantumEntangledAndy Neolink binary for the target arch.
 #
 # Release naming (as of v0.6.3.rc.2):

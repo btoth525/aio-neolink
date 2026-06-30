@@ -121,15 +121,24 @@ aio-neolink/
 
 ## 6. Work order (do these in this order)
 
-### 6.1 BLOCKER — ship a real Neolink binary
-`rootfs/fetch-neolink.sh` currently writes a placeholder so the image builds during
-scaffolding. Replace it with one of:
-- a `curl` of the QuantumEntangledAndy Neolink release asset matching `$BUILD_ARCH`
-  (aarch64/amd64), **or**
-- a multi-stage `cargo build` from a pinned Neolink commit (slower build, full control —
-  required anyway once you fork).
+### 6.1 ✅ DONE (v0.1.6) — build a real Neolink binary from source
+The `Dockerfile` now compiles Neolink in a multi-stage builder from a **pinned master
+commit** (`6e05e7844b5b…`, Cargo.toml version **0.6.3-rc.3**) and copies the binary into
+the runtime image. `rootfs/fetch-neolink.sh` is retained but **no longer used**.
 
-Until this is done, nothing streams.
+Why source, not a release: the newest *released* asset is `v0.6.3.rc.2` (commit
+`7158943`). On the target E1 (firmware `v3.2.0.4858`, 2025-08) rc.2 connects, logs in,
+and lists `/movie-room/mainStream` etc. as available — but then **delivers RTP only
+intermittently and hangs after ~30 s**. GStreamer's own `rtspsrc` (the proven client)
+fails identically with *"Could not receive message (Timeout while waiting for server
+response) … pipeline doesn't want to preroll"*, proving the fault is in Neolink, not the
+watchdog probe. The original "Neolink-latest" add-on that worked on this exact camera
+reported `0.6.3-rc.3` — i.e. it was a **source build of master**, which is what we now
+reproduce. To move Neolink forward, bump `NEOLINK_COMMIT` in the Dockerfile.
+
+Trade-off: the first image build compiles Rust (several minutes natively, longer under
+arch emulation) and wants ~2-4 GB RAM. Docker layer caching means it only recompiles
+when `NEOLINK_COMMIT` or the build deps change; Python-only edits rebuild fast.
 
 ### 6.2 Verify the two external contracts against reality
 These were written from docs/memory and **must be checked against the actual versions
@@ -150,9 +159,12 @@ Once it streams, simulate the **exact** original failure (a hang, not a crash):
 # inside the add-on container
 kill -STOP <neolink_pid>     # freeze the process — RTSP goes silent but PID lives
 ```
-Watch the supervisor log. Within `health_interval × failures_before_restart` (default
-15s × 2) it should detect silence and restart the pipeline, and the camera should return
-to `live` on its own. **If this passes, the core mission is met.**
+Watch the supervisor log. Within roughly `watchdog_timeout` (default 120s, reached as
+`health_interval 30s × failures_before_restart 4`) it should detect sustained silence and
+restart the pipeline, and the camera should return to `live` on its own. **If this passes,
+the core mission is met.** Note the watchdog is deliberately tolerant: it restarts only on
+*sustained* failure, because bouncing Neolink drops every client (Frigate included) and a
+hair-trigger watchdog actively prevents a merely-flaky feed from settling.
 
 ### 6.4 Features pass
 GUI probe auto-fills capabilities from a real camera; PTZ nudges, spotlight, siren, IR
@@ -216,5 +228,6 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
 
 ---
 
-*Last updated: project scaffold v0.1. Keep this current — it's the contract between
-sessions.*
+*Last updated: v0.1.6 — Neolink now builds from source (rc.3) to fix intermittent
+stream hangs; watchdog made tolerant (sustained-failure only); web GUI gained a
+gst-launch live preview. Keep this current — it's the contract between sessions.*
