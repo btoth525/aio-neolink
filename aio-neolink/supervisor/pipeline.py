@@ -65,6 +65,7 @@ class SupervisorOptions:
     rtsp_host: str = "127.0.0.1"
     rtsp_port: int = 8554
     restart_backoff: float = 5.0     # min seconds between full process restarts
+    startup_grace: float = 25.0      # seconds after (re)start before probes count as failures
 
 
 # ---------------------------------------------------------------------------
@@ -90,55 +91,103 @@ async def _probe_rtp(host: str, port: int, stream_name: str, timeout: float) -> 
 
     try:
         cseq = 0
+        _buf = bytearray()   # shared read buffer so we never lose bytes between calls
 
-        async def _send(method: str, headers: dict | None = None) -> str:
+        async def _read_response() -> str:
+            """Read RTSP response headers (up to blank line) into _buf, return headers only."""
+            while b"\r\n\r\n" not in _buf:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=8.0)
+                if not chunk:
+                    raise ConnectionError("connection closed")
+                _buf.extend(chunk)
+            # Split off exactly the headers; keep leftover bytes (body or next response).
+            hdr_end = _buf.index(b"\r\n\r\n") + 4
+            hdrs = bytes(_buf[:hdr_end])
+            del _buf[:hdr_end]
+            return hdrs.decode(errors="replace")
+
+        async def _discard_body(headers: str) -> None:
+            """Drain the response body (Content-Length) so the buffer is clean."""
+            cl = 0
+            for line in headers.splitlines():
+                if line.lower().startswith("content-length:"):
+                    cl = int(line.split(":", 1)[1].strip())
+                    break
+            while len(_buf) < cl:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=8.0)
+                if not chunk:
+                    break
+                _buf.extend(chunk)
+            del _buf[:cl]
+
+        async def _send(method: str, req_url: str = "", extra_headers: dict | None = None) -> str:
             nonlocal cseq
             cseq += 1
-            lines = [f"{method} {url} RTSP/1.0", f"CSeq: {cseq}"]
-            for k, v in (headers or {}).items():
+            target = req_url or url
+            lines = [
+                f"{method} {target} RTSP/1.0",
+                f"CSeq: {cseq}",
+                "User-Agent: aio-neolink",
+            ]
+            for k, v in (extra_headers or {}).items():
                 lines.append(f"{k}: {v}")
             lines += ["", ""]
             writer.write("\r\n".join(lines).encode())
             await writer.drain()
-            # Read until blank line (end of headers).
-            response = b""
-            while b"\r\n\r\n" not in response:
-                chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
-                if not chunk:
-                    raise ConnectionError("connection closed during response")
-                response += chunk
-            return response.decode(errors="replace")
+            return await _read_response()
 
         # OPTIONS — confirm the server is alive.
         resp = await _send("OPTIONS")
         if "RTSP/1.0 200" not in resp:
-            return False, f"OPTIONS failed: {resp[:80]}"
+            return False, f"OPTIONS failed: {resp[:120]}"
+        await _discard_body(resp)
 
-        # DESCRIBE — get SDP so we know the track path.
-        resp = await _send("DESCRIBE", {"Accept": "application/sdp"})
+        # DESCRIBE — get SDP so we know the track control path.
+        resp = await _send("DESCRIBE", extra_headers={"Accept": "application/sdp"})
         if "RTSP/1.0 200" not in resp:
-            return False, f"DESCRIBE failed: {resp[:80]}"
+            return False, f"DESCRIBE failed: {resp[:120]}"
 
-        # Parse the first trackID from the SDP control lines.
-        track = "trackID=0"
+        # Collect SDP body before parsing so it doesn't bleed into the next read.
+        cl = 0
         for line in resp.splitlines():
-            if line.strip().startswith("a=control:") and "track" in line.lower():
-                track = line.split("a=control:", 1)[-1].strip()
-                if track.startswith("rtsp://"):
-                    # Absolute URL — extract just the track path suffix.
-                    track = track.split("/")[-1]
+            if line.lower().startswith("content-length:"):
+                cl = int(line.split(":", 1)[1].strip())
                 break
+        while len(_buf) < cl:
+            chunk = await asyncio.wait_for(reader.read(4096), timeout=8.0)
+            if not chunk:
+                break
+            _buf.extend(chunk)
+        sdp_text = bytes(_buf[:cl]).decode(errors="replace")
+        del _buf[:cl]
 
-        # SETUP — request interleaved (TCP) transport so RTP comes back on this socket.
+        # Parse the first track-level a=control line from the SDP.
+        # GStreamer RTSP servers emit "a=control:stream=0"; other servers use
+        # "a=control:trackID=0".  The session-level wildcard "a=control:*" is skipped.
+        track_url = url.rstrip("/") + "/stream=0"   # GStreamer default
+        in_media = False
+        for line in sdp_text.splitlines():
+            line = line.strip()
+            if line.startswith("m="):
+                in_media = True
+            if in_media and line.startswith("a=control:"):
+                ctrl = line[len("a=control:"):].strip()
+                if ctrl and ctrl != "*":
+                    if ctrl.startswith("rtsp://"):
+                        track_url = ctrl
+                    else:
+                        track_url = url.rstrip("/") + "/" + ctrl.lstrip("/")
+                    break
+
+        # SETUP — must target the track URL, not the session URL.
         resp = await _send(
             "SETUP",
-            {
-                "Transport": "RTP/AVP/TCP;unicast;interleaved=0-1",
-                "Content-Length": "0",
-            },
+            track_url,
+            {"Transport": "RTP/AVP/TCP;unicast;interleaved=0-1"},
         )
         if "RTSP/1.0 200" not in resp:
-            return False, f"SETUP failed: {resp[:80]}"
+            return False, f"SETUP failed (track={track_url!r}): {resp[:120]}"
+        await _discard_body(resp)
 
         # Extract Session header.
         session_id = ""
@@ -151,14 +200,16 @@ async def _probe_rtp(host: str, port: int, stream_name: str, timeout: float) -> 
         play_headers: dict = {"Range": "npt=0.000-"}
         if session_id:
             play_headers["Session"] = session_id
-        resp = await _send("PLAY", play_headers)
+        resp = await _send("PLAY", extra_headers=play_headers)
         if "RTSP/1.0 200" not in resp:
-            return False, f"PLAY failed: {resp[:80]}"
+            return False, f"PLAY failed: {resp[:120]}"
 
-        # Now wait for interleaved RTP data (starts with $ byte).
-        # Any byte arriving means frames are flowing.
+        # Wait for interleaved RTP data.  Any byte arriving means frames are flowing.
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
+            # Check the shared buffer first (might already have bytes from PLAY response).
+            if _buf:
+                return True, ""
             remaining = deadline - asyncio.get_event_loop().time()
             try:
                 byte = await asyncio.wait_for(reader.read(1), timeout=min(remaining, 2.0))
@@ -247,7 +298,12 @@ class PipelineManager:
     async def _drain_logs(self, proc: asyncio.subprocess.Process) -> None:
         assert proc.stdout is not None
         async for raw in proc.stdout:
-            log.info("[neolink] %s", raw.decode(errors="replace").rstrip())
+            line = raw.decode(errors="replace").rstrip()
+            # Neolink polls Reolink's cloud push-notification server; this fails in
+            # local-only setups and would otherwise spam the log every 4 seconds.
+            if "pushnoti" in line and "Issue connecting" in line:
+                continue
+            log.info("[neolink] %s", line)
         rc = await proc.wait()
         log.warning("neolink exited with code %s", rc)
 
@@ -277,15 +333,29 @@ class PipelineManager:
     async def _probe_all(self) -> None:
         if not self._cameras:
             return
+
+        # Don't count probe failures during startup — Neolink needs time to negotiate
+        # with the camera before its RTSP server is fully serving frames.
+        in_grace = (time.monotonic() - self._last_restart) < self.opts.startup_grace
+
         unhealthy: list[str] = []
 
         for cam in self._cameras:
             if not cam.enabled:
                 continue
+
+            # Probe a concrete stream path.  GStreamer RTSP aggregate URLs can behave
+            # differently from track-specific paths; mainStream/subStream are always
+            # listed explicitly by Neolink and respond reliably.
+            if cam.stream == "subStream":
+                probe_path = f"{cam.name}/subStream"
+            else:
+                probe_path = f"{cam.name}/mainStream"
+
             ok, err = await _probe_rtp(
                 self.opts.rtsp_host,
                 self.opts.rtsp_port,
-                cam.name,
+                probe_path,
                 _PROBE_TIMEOUT,
             )
             h = self._health.setdefault(cam.name, PipelineHealth(camera_name=cam.name))
@@ -295,6 +365,13 @@ class PipelineManager:
                 h.healthy = True
                 h.last_error = ""
             else:
+                if in_grace:
+                    # Log but don't count as failure during startup window.
+                    log.debug(
+                        "camera %s probe during startup grace (%s) — not counting",
+                        cam.name, err,
+                    )
+                    continue
                 h.consecutive_failures += 1
                 h.healthy = False
                 h.last_error = err

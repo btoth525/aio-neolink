@@ -30,8 +30,10 @@ function stateFor(name) {
 }
 
 function rtspUrl(cam) {
-  const host = location.hostname || "homeassistant.local";
-  return `rtsp://${host}:8554/${cam.name}`;
+  // RTSP is served on port 8554 of the HA host directly — not through Ingress.
+  // homeassistant.local resolves to your HA host on the local network.
+  // Replace with your HA host's LAN IP if mDNS isn't working (e.g. 192.168.1.x).
+  return `rtsp://homeassistant.local:8554/${cam.name}`;
 }
 
 function card(cam) {
