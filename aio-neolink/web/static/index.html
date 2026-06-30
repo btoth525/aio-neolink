@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>aio-neolink</title>
+  <link rel="stylesheet" href="static/style.css" />
+</head>
+<body>
+  <header class="bar">
+    <div class="wordmark">
+      <span class="dot" aria-hidden="true"></span>
+      aio<span class="thin">·</span>neolink
+    </div>
+    <div class="bar-meta" id="summary">—</div>
+  </header>
+
+  <main>
+    <section class="lead">
+      <h1>Your cameras, kept alive.</h1>
+      <p>Add a Reolink camera by address and password. aio-neolink probes it, builds
+         the stream, and watches it — if a feed goes quiet, it recovers on its own.</p>
+    </section>
+
+    <section class="grid" id="cameras" aria-live="polite"></section>
+
+    <button class="add-tile" id="openAdd">
+      <span class="plus" aria-hidden="true">+</span>
+      Add a camera
+    </button>
+  </main>
+
+  <!-- Add / edit dialog -->
+  <dialog id="addDialog">
+    <form method="dialog" id="addForm">
+      <h2>Add a camera</h2>
+
+      <label>Name <small>— the RTSP path Frigate will use</small>
+        <input name="name" placeholder="movie_room" required pattern="[A-Za-z0-9_\-]+" />
+      </label>
+
+      <div class="row">
+        <label>Address
+          <input name="address" placeholder="192.168.1.236" />
+        </label>
+        <label class="narrow">Port
+          <input name="port" type="number" value="9000" />
+        </label>
+      </div>
+
+      <div class="row">
+        <label>Username
+          <input name="username" value="admin" />
+        </label>
+        <label>Password
+          <input name="password" type="password" />
+        </label>
+      </div>
+
+      <label>Streams
+        <select name="stream">
+          <option value="both">Main + sub (recommended)</option>
+          <option value="mainStream">Main only</option>
+          <option value="subStream">Sub only</option>
+        </select>
+      </label>
+
+      <div class="probe" id="probeResult" hidden></div>
+
+      <div class="actions">
+        <button type="button" id="testBtn" class="ghost">Test connection</button>
+        <span class="spacer"></span>
+        <button type="button" id="cancelBtn" class="ghost">Cancel</button>
+        <button type="submit" class="primary">Save camera</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script src="static/app.js"></script>
+</body>
+</html>

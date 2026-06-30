@@ -1,0 +1,8 @@
+# Control plane + supervisor dependencies.
+# Pin majors; let patch releases float. Bump deliberately.
+
+reolink-aio>=0.11        # Reolink-authorized Baichuan + HTTP API: probe, PTZ, lights, siren, events
+fastapi>=0.110           # REST API + serves the GUI
+uvicorn[standard]>=0.29  # ASGI server
+aiofiles>=23.0           # async file I/O for the camera store
+jinja2>=3.1              # neolink.toml templating

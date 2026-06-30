@@ -1,0 +1,45 @@
+name: aio-neolink
+version: "0.1.0"
+slug: aio_neolink
+description: Reliable Reolink Baichuan-to-RTSP bridge with self-healing, PTZ/audio control, and a web GUI
+url: https://github.com/YOUR_GITHUB_USERNAME/aio-neolink
+arch:
+  - aarch64
+  - amd64
+
+# Host network is required: Neolink serves RTSP on :8554 and must reach the camera
+# on :9000 directly, same as the original add-on.
+host_network: true
+
+# The supervisor's FastAPI app is exposed through Ingress so the GUI shows up as a
+# panel in the HA sidebar — no port to remember, auth handled by HA.
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:cctv
+panel_title: aio-neolink
+init: false
+
+ports:
+  8554/tcp: 8554        # RTSP out (Frigate connects here)
+  8099/tcp: null        # GUI/API, normally reached via Ingress; expose if you want direct access
+ports_description:
+  8554/tcp: RTSP stream output for Frigate / go2rtc / Blue Iris
+  8099/tcp: Web GUI and REST API (optional direct access; Ingress is preferred)
+
+# Camera definitions, credentials, and supervisor state live in /data so they survive
+# restarts and updates.
+map:
+  - addon_config:rw
+
+options:
+  log_level: info
+  # Health watchdog: if a camera's RTSP output produces no data for this many seconds,
+  # restart that camera's pipeline. 0 disables the watchdog.
+  watchdog_timeout: 45
+  # How often the supervisor probes each stream's health, in seconds.
+  health_interval: 15
+
+schema:
+  log_level: list(trace|debug|info|warn|error)
+  watchdog_timeout: int(0,3600)
+  health_interval: int(5,600)
