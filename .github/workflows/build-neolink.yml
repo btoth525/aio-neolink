@@ -1,0 +1,104 @@
+name: Build Neolink binary
+
+# Compiles Neolink from source (the rc.3 master commit) on GitHub's runners and
+# publishes the binaries as a release, so the aio-neolink add-on can DOWNLOAD a
+# prebuilt binary instead of compiling Rust on the Home Assistant device.
+#
+# The compile runs inside a Debian bookworm container (rust:slim-bookworm) so the
+# resulting dynamically linked binary matches the add-on's bookworm runtime glibc.
+# Each arch builds natively (amd64 on ubuntu-latest, arm64 on an arm runner) — no
+# slow emulation.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths: [ '.github/workflows/build-neolink.yml' ]
+
+permissions:
+  contents: write
+
+env:
+  NEOLINK_REPO: QuantumEntangledAndy/neolink
+  NEOLINK_COMMIT: 6e05e7844b5b50f89787d30bffcbbd3471bfcfde
+  RELEASE_TAG: neolink-rc3
+
+jobs:
+  build:
+    name: build-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Compile Neolink in a Debian bookworm container
+        run: |
+          docker run --rm \
+            -e NEOLINK_REPO="${NEOLINK_REPO}" \
+            -e NEOLINK_COMMIT="${NEOLINK_COMMIT}" \
+            -e ARCH="${{ matrix.arch }}" \
+            -v "${PWD}:/out" \
+            rust:slim-bookworm bash -euo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential ca-certificates curl openssl libssl-dev \
+                libgstrtspserver-1.0-dev libgstreamer1.0-dev libgtk2.0-dev \
+                protobuf-compiler libglib2.0-dev
+              mkdir -p /src
+              curl -fsSL "https://github.com/${NEOLINK_REPO}/archive/${NEOLINK_COMMIT}.tar.gz" \
+                -o /tmp/neolink.tar.gz
+              tar xzf /tmp/neolink.tar.gz -C /src --strip-components=1
+              cd /src
+              # Upstream .cargo/config.toml pins a cross-linker for aarch64; force the
+              # stock cc when building natively on arm64 (harmless on amd64). The
+              # tokio_unstable rustflag in that config is preserved (we never set RUSTFLAGS).
+              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=cc
+              cargo build --release
+              strip target/release/neolink
+              cp target/release/neolink "/out/neolink-linux-${ARCH}"
+              "/out/neolink-linux-${ARCH}" --version || true
+            '
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neolink-linux-${{ matrix.arch }}
+          path: neolink-linux-${{ matrix.arch }}
+          if-no-files-found: error
+
+  release:
+    name: Publish prebuilt binaries
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show artifacts
+        run: ls -lR dist
+
+      - name: Publish / refresh the prebuilt-binary release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Neolink 0.6.3-rc.3 prebuilt binaries
+          body: |
+            Prebuilt Neolink 0.6.3-rc.3 (upstream commit 6e05e7844b5b) for the
+            aio-neolink add-on. Built by CI so the add-on downloads the binary
+            instead of compiling Rust on the Home Assistant device.
+
+            Assets: neolink-linux-amd64, neolink-linux-arm64
+          files: dist/*
+          fail_on_unmatched_files: false
