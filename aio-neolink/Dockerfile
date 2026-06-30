@@ -22,9 +22,13 @@ ENV LANG=C.UTF-8 \
 # --- Runtime dependencies -----------------------------------------------------------
 # GStreamer is the media pipeline Neolink links against. We need plugins-bad for the
 # RTSP server (gstrtsp) and plugins-ugly for H.264 parsing (x264/avdec_h264).
+# ffmpeg powers the GUI's live preview: it reads the local RTSP output and re-encodes
+# a low-rate MJPEG stream that any browser can render directly in an <img> tag, since
+# browsers cannot play RTSP natively.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl unzip \
         python3 python3-pip \
+        ffmpeg \
         gstreamer1.0-plugins-base \
         gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad \

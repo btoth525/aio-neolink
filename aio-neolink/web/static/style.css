@@ -82,6 +82,25 @@ main { max-width: 1080px; margin: 0 auto; padding: 36px 24px 80px; }
 .card.warn   { --state: var(--warn); }
 .card.down   { --state: var(--down); }
 
+/* live preview — bleeds to the card edges; left margin stops 3px short so the
+   health-color accent bar (.card::before) stays visible underneath it. */
+.preview {
+  position: relative;
+  margin: -18px -18px 14px -15px;
+  aspect-ratio: 16 / 9;
+  background: #0a0d12;
+}
+.preview-img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+  opacity: 0; transition: opacity .25s ease;
+}
+.preview-img.loaded { opacity: 1; }
+.preview-state {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 12.5px; letter-spacing: .02em;
+}
+
 .card h3 {
   margin: 0 0 2px; font-family:'Space Grotesk',sans-serif; font-size: 17px; font-weight: 600;
 }

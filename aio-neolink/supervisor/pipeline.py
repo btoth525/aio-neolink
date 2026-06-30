@@ -44,8 +44,7 @@ log = logging.getLogger("aio-neolink.pipeline")
 NEOLINK_BIN = os.environ.get("NEOLINK_BIN", "/usr/local/bin/neolink")
 
 # Seconds to wait for at least one RTP byte during a probe.
-# Must be shorter than health_interval so probes don't queue up.
-_PROBE_TIMEOUT = 10.0
+_PROBE_TIMEOUT = 12.0
 
 
 @dataclass
@@ -65,7 +64,7 @@ class SupervisorOptions:
     rtsp_host: str = "127.0.0.1"
     rtsp_port: int = 8554
     restart_backoff: float = 5.0     # min seconds between full process restarts
-    startup_grace: float = 30.0      # seconds after (re)start before probes count as failures
+    startup_grace: float = 45.0      # seconds after (re)start before probes count as failures
 
 
 # ---------------------------------------------------------------------------
@@ -122,24 +121,27 @@ async def _probe_rtp(host: str, port: int, stream_name: str, timeout: float) -> 
             _buf.extend(chunk)
         del _buf[:cl]
 
-    async def _run_probe() -> tuple[bool, str]:
-        cseq = 0
+    cseq = 0
+    session_id = ""   # populated once SETUP responds; used for TEARDOWN cleanup
 
-        async def _send(method: str, req_url: str = "", extra_headers: dict | None = None) -> str:
-            nonlocal cseq
-            cseq += 1
-            target = req_url or url
-            lines = [
-                f"{method} {target} RTSP/1.0",
-                f"CSeq: {cseq}",
-                "User-Agent: aio-neolink",
-            ]
-            for k, v in (extra_headers or {}).items():
-                lines.append(f"{k}: {v}")
-            lines += ["", ""]
-            writer.write("\r\n".join(lines).encode())
-            await writer.drain()
-            return await _read_response()
+    async def _send(method: str, req_url: str = "", extra_headers: dict | None = None) -> str:
+        nonlocal cseq
+        cseq += 1
+        target = req_url or url
+        lines = [
+            f"{method} {target} RTSP/1.0",
+            f"CSeq: {cseq}",
+            "User-Agent: aio-neolink",
+        ]
+        for k, v in (extra_headers or {}).items():
+            lines.append(f"{k}: {v}")
+        lines += ["", ""]
+        writer.write("\r\n".join(lines).encode())
+        await writer.drain()
+        return await _read_response()
+
+    async def _run_probe() -> tuple[bool, str]:
+        nonlocal session_id
 
         # OPTIONS — confirm the server is alive.
         resp = await _send("OPTIONS")
@@ -195,7 +197,6 @@ async def _probe_rtp(host: str, port: int, stream_name: str, timeout: float) -> 
         await _discard_body(resp)
 
         # Extract Session header.
-        session_id = ""
         for line in resp.splitlines():
             if line.lower().startswith("session:"):
                 session_id = line.split(":", 1)[1].strip().split(";")[0]
@@ -235,6 +236,19 @@ async def _probe_rtp(host: str, port: int, stream_name: str, timeout: float) -> 
     except Exception as exc:  # noqa: BLE001
         return False, f"probe error: {exc}"
     finally:
+        # Always TEARDOWN a session we opened. Closing the TCP socket without it
+        # leaves the session dangling server-side until its own timeout — cheap
+        # to avoid, and removes any chance of session buildup affecting later
+        # probes or other RTSP clients (e.g. Frigate) on the same camera.
+        if session_id:
+            try:
+                writer.write(
+                    f"TEARDOWN {url} RTSP/1.0\r\nCSeq: {cseq + 1}\r\n"
+                    f"Session: {session_id}\r\nUser-Agent: aio-neolink\r\n\r\n".encode()
+                )
+                await asyncio.wait_for(writer.drain(), timeout=2.0)
+            except Exception:  # noqa: BLE001
+                pass
         try:
             writer.close()
             await writer.wait_closed()
@@ -397,6 +411,15 @@ class PipelineManager:
         if unhealthy:
             async with self._lock:
                 await self._restart_locked(reason=f"unhealthy cameras: {unhealthy}")
+            # Give each restarted camera a clean failure budget. Without this, a
+            # single post-restart hiccup (the new process is still settling) adds
+            # to the stale pre-restart count and instantly re-triggers another
+            # restart — a self-sustaining restart loop that never recovers, since
+            # only a *successful* probe would otherwise clear the counter.
+            for name in unhealthy:
+                h = self._health.get(name)
+                if h:
+                    h.consecutive_failures = 0
 
     def health_snapshot(self) -> dict[str, dict]:
         return {

@@ -10,6 +10,7 @@ const api = (path, opts) => fetch(path, opts).then(async r => {
 
 let cameras = [];
 let health = {};
+const cardEls = new Map(); // camera name -> persistent card element (keeps the live preview alive across refreshes)
 
 function toast(msg, bad = false) {
   const t = $("#toast");
@@ -36,17 +37,30 @@ function rtspUrl(cam) {
   return `rtsp://homeassistant.local:8554/${cam.name}`;
 }
 
-function card(cam) {
+function previewUrl(cam) {
+  return `api/cameras/${encodeURIComponent(cam.name)}/preview`;
+}
+
+// --- card lifecycle --------------------------------------------------------------
+// Cards are created once per camera and patched in place on every refresh. This
+// matters specifically for the preview <img>: recreating it every poll would tear
+// down its live MJPEG connection (and the ffmpeg process behind it) every 8 seconds.
+
+function buildCard(cam) {
   const s = stateFor(cam.name);
   const caps = cam.capabilities || {};
   const el = document.createElement("article");
   el.className = `card ${s.cls}`;
   el.innerHTML = `
+    <div class="preview" data-role="preview">
+      <img class="preview-img" alt="" />
+      <span class="preview-state" data-role="preview-state">Connecting…</span>
+    </div>
     <h3>${cam.name}</h3>
     <div class="addr">${cam.address ? `${cam.address}:${cam.port}` : (cam.uid || "—")}</div>
-    <div class="status"><span class="led"></span>${s.label}
+    <div class="status" data-role="status"><span class="led"></span>${s.label}
       ${s.note ? `<small>· ${s.note}</small>` : ""}</div>
-    <div class="rtsp">${rtspUrl(cam)}</div>
+    <div class="rtsp" data-role="rtsp">${rtspUrl(cam)}</div>
     <div class="controls">
       <button data-act="ir"        ${caps.supports_ir ? "" : "disabled"}>IR</button>
       <button data-act="spotlight" ${caps.supports_spotlight ? "" : "disabled"}>Light</button>
@@ -59,16 +73,84 @@ function card(cam) {
   el.querySelectorAll(".controls button").forEach(btn => {
     btn.addEventListener("click", () => onControl(cam, btn.dataset.act, btn.dataset.op));
   });
+
+  const img = $(".preview-img", el);
+  const stateEl = $(".preview-state", el);
+  img.dataset.previewUrl = previewUrl(cam);
+  img.addEventListener("load", () => {
+    img.classList.add("loaded");
+    stateEl.hidden = true;
+  });
+  img.addEventListener("error", () => {
+    img.classList.remove("loaded");
+    stateEl.hidden = false;
+    stateEl.textContent = "Preview unavailable";
+  });
+  if (document.visibilityState !== "hidden") startPreview(img);
+
   return el;
 }
 
+function updateCard(el, cam) {
+  const s = stateFor(cam.name);
+  const caps = cam.capabilities || {};
+  el.className = `card ${s.cls}`;
+  $('[data-role="status"]', el).innerHTML =
+    `<span class="led"></span>${s.label}${s.note ? ` <small>· ${s.note}</small>` : ""}`;
+  $('[data-role="rtsp"]', el).textContent = rtspUrl(cam);
+  el.querySelector('[data-act="ir"]').disabled = !caps.supports_ir;
+  el.querySelector('[data-act="spotlight"]').disabled = !caps.supports_spotlight;
+  el.querySelector('[data-act="siren"]').disabled = !caps.supports_siren;
+  el.querySelectorAll('[data-act="ptz"]').forEach(b => (b.disabled = !caps.supports_ptz));
+  // Preview <img> is intentionally left untouched here — its src is set once in
+  // buildCard() and must survive refreshes so the live stream doesn't restart.
+}
+
+function startPreview(img) {
+  img.src = `${img.dataset.previewUrl}?t=${Date.now()}`;
+}
+
+function stopPreview(img) {
+  img.removeAttribute("src");
+  img.classList.remove("loaded");
+}
+
+// Pause every live preview while the tab is hidden — an MJPEG connection per camera
+// is real (if modest) CPU/bandwidth on whatever small box runs Home Assistant, no
+// reason to pay for it when nobody's looking at the dashboard.
+document.addEventListener("visibilitychange", () => {
+  cardEls.forEach(el => {
+    const img = $(".preview-img", el);
+    if (!img) return;
+    if (document.visibilityState === "hidden") stopPreview(img);
+    else startPreview(img);
+  });
+});
+
 function render() {
   const grid = $("#cameras");
-  grid.innerHTML = "";
   if (!cameras.length) {
     grid.innerHTML = `<p class="empty">No cameras yet. Add your first one below.</p>`;
+    cardEls.clear();
   } else {
-    cameras.forEach(c => grid.appendChild(card(c)));
+    const seen = new Set();
+    cameras.forEach(cam => {
+      seen.add(cam.name);
+      let el = cardEls.get(cam.name);
+      if (!el) {
+        el = buildCard(cam);
+        cardEls.set(cam.name, el);
+        grid.appendChild(el);
+      } else {
+        updateCard(el, cam);
+      }
+    });
+    for (const [name, el] of cardEls) {
+      if (!seen.has(name)) {
+        el.remove();
+        cardEls.delete(name);
+      }
+    }
   }
   const live = cameras.filter(c => stateFor(c.name).cls === "live").length;
   $("#summary").textContent = `${live}/${cameras.length} live`;
@@ -92,6 +174,7 @@ async function onControl(cam, action, op) {
     try {
       await api(`api/cameras/${cam.name}`, { method: "DELETE" });
       toast(`Removed ${cam.name}`);
+      cardEls.delete(cam.name);
       refresh();
     } catch (e) { toast(e.message, true); }
     return;
