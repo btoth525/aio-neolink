@@ -8,33 +8,22 @@ arch:
   - aarch64
   - amd64
 
-# Start after network is up so Neolink can reach cameras on boot.
 startup: services
+boot: auto
+init: false
 
-# HA-level watchdog — restarts the add-on if the process exits unexpectedly.
-# Our Python watchdog handles Neolink hangs; this handles the supervisor itself.
-watchdog: true
-
-# Host network required: Neolink must reach cameras on :9000 and bind RTSP on :8554.
 host_network: true
 
-# Ingress wires the FastAPI web UI into the HA sidebar.
-# "Open Web UI" button and the sidebar panel both use this.
 ingress: true
 ingress_port: 8099
 panel_icon: mdi:cctv
 panel_title: aio-neolink
 
-init: false
-
 ports:
   8554/tcp: 8554
-  8099/tcp: null
 ports_description:
   8554/tcp: "RTSP output for Frigate / go2rtc / Blue Iris"
-  8099/tcp: "Web GUI + REST API (Ingress preferred; expose for direct access)"
 
-# User-configurable options — shown in the HA add-on Configuration tab.
 options:
   log_level: info
   watchdog_timeout: 45
