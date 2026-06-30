@@ -1,5 +1,5 @@
 name: aio-neolink
-version: "0.1.8"
+version: "0.1.9"
 slug: aio_neolink
 description: "Reliable Reolink Baichuan-to-RTSP bridge with self-healing watchdog, PTZ/lights/siren control, and a web GUI"
 url: https://github.com/btoth525/aio-neolink

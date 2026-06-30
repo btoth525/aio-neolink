@@ -10,7 +10,7 @@ const api = (path, opts) => fetch(path, opts).then(async r => {
 
 let cameras = [];
 let health = {};
-const cardEls = new Map(); // camera name -> persistent card element (keeps the live preview alive across refreshes)
+const cardEls = new Map(); // camera name -> persistent card element
 
 function toast(msg, bad = false) {
   const t = $("#toast");
@@ -37,14 +37,16 @@ function rtspUrl(cam) {
   return `rtsp://homeassistant.local:8554/${cam.name}`;
 }
 
-function previewUrl(cam) {
-  return `api/cameras/${encodeURIComponent(cam.name)}/preview`;
-}
-
 // --- card lifecycle --------------------------------------------------------------
-// Cards are created once per camera and patched in place on every refresh. This
-// matters specifically for the preview <img>: recreating it every poll would tear
-// down its live MJPEG connection (and the ffmpeg process behind it) every 8 seconds.
+// Cards are created once per camera and patched in place on every refresh, so
+// per-card state (e.g. button listeners) doesn't need re-wiring every poll.
+//
+// No live preview: an MJPEG preview opens its own RTSP connection to Neolink as
+// soon as it loads, which can land while Neolink is still negotiating with the
+// camera and was observed to trip Neolink's own RTSP pipeline ("could not create
+// element") and leave it dropping frames ("App source is closed"). Holding the
+// actual stream for Frigate matters far more than a thumbnail, so the GUI doesn't
+// open any RTSP connection of its own.
 
 function buildCard(cam) {
   const s = stateFor(cam.name);
@@ -52,10 +54,6 @@ function buildCard(cam) {
   const el = document.createElement("article");
   el.className = `card ${s.cls}`;
   el.innerHTML = `
-    <div class="preview" data-role="preview">
-      <img class="preview-img" alt="" />
-      <span class="preview-state" data-role="preview-state">Connecting…</span>
-    </div>
     <h3>${cam.name}</h3>
     <div class="addr">${cam.address ? `${cam.address}:${cam.port}` : (cam.uid || "—")}</div>
     <div class="status" data-role="status"><span class="led"></span>${s.label}
@@ -74,20 +72,6 @@ function buildCard(cam) {
     btn.addEventListener("click", () => onControl(cam, btn.dataset.act, btn.dataset.op));
   });
 
-  const img = $(".preview-img", el);
-  const stateEl = $(".preview-state", el);
-  img.dataset.previewUrl = previewUrl(cam);
-  img.addEventListener("load", () => {
-    img.classList.add("loaded");
-    stateEl.hidden = true;
-  });
-  img.addEventListener("error", () => {
-    img.classList.remove("loaded");
-    stateEl.hidden = false;
-    stateEl.textContent = "Preview unavailable";
-  });
-  if (document.visibilityState !== "hidden") startPreview(img);
-
   return el;
 }
 
@@ -102,30 +86,7 @@ function updateCard(el, cam) {
   el.querySelector('[data-act="spotlight"]').disabled = !caps.supports_spotlight;
   el.querySelector('[data-act="siren"]').disabled = !caps.supports_siren;
   el.querySelectorAll('[data-act="ptz"]').forEach(b => (b.disabled = !caps.supports_ptz));
-  // Preview <img> is intentionally left untouched here — its src is set once in
-  // buildCard() and must survive refreshes so the live stream doesn't restart.
 }
-
-function startPreview(img) {
-  img.src = `${img.dataset.previewUrl}?t=${Date.now()}`;
-}
-
-function stopPreview(img) {
-  img.removeAttribute("src");
-  img.classList.remove("loaded");
-}
-
-// Pause every live preview while the tab is hidden — an MJPEG connection per camera
-// is real (if modest) CPU/bandwidth on whatever small box runs Home Assistant, no
-// reason to pay for it when nobody's looking at the dashboard.
-document.addEventListener("visibilitychange", () => {
-  cardEls.forEach(el => {
-    const img = $(".preview-img", el);
-    if (!img) return;
-    if (document.visibilityState === "hidden") stopPreview(img);
-    else startPreview(img);
-  });
-});
 
 function render() {
   const grid = $("#cameras");
