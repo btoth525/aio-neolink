@@ -99,21 +99,33 @@ Reolink camera
 1. Click **aio-neolink** in the store
 2. Click **Install** and wait for the image to download (~1–2 min on first install)
 
-### Step 3 — Start the add-on
+### Step 3 — Configure and start
 
-1. Go to the **Configuration** tab and review the options (defaults are fine to start)
-2. Toggle **Show in sidebar** ON — this adds the GUI panel to your sidebar
-3. Click **Start**
-4. Open the **Log** tab and confirm you see:
+**Configuration tab** — three options, all optional to change:
+
+| Option | Default | What it does |
+|---|---|---|
+| `log_level` | `info` | `debug` for more detail, `warn` for quiet |
+| `watchdog_timeout` | `45` | Seconds of stream silence before forced restart |
+| `health_interval` | `15` | Seconds between health probes |
+
+1. Toggle **Show in sidebar** ON — adds the GUI panel to your HA sidebar
+2. Click **Start**
+3. Open the **Log** tab and confirm you see:
    ```
-   aio-neolink up: API on :8099, watchdog running
+   ============================================================
+   aio-neolink starting
+   ============================================================
+   aio-neolink ready — watchdog active, Web UI on :8099
    ```
 
-### Step 4 — Add your cameras via the GUI
+### Step 4 — Add your cameras via the Web UI
 
-1. Click **aio-neolink** in the HA sidebar (or open the **Web UI** button from the
-   add-on page)
-2. Click **+ Add a camera**
+Open the GUI in one of two ways:
+- Click **aio-neolink** in the HA sidebar (if you enabled "Show in sidebar"), OR
+- Click the **Open Web UI** button on the add-on Info tab
+
+1. Click **+ Add a camera**
 3. Fill in:
    | Field | Example | Notes |
    |---|---|---|
@@ -150,26 +162,23 @@ to what Neolink served — no other changes needed.
 
 ---
 
-## Configuration options
+## Configuration
 
-Set these in the add-on's **Configuration** tab:
+All options live in the add-on's **Configuration tab** in HA:
 
 | Option | Default | Description |
 |---|---|---|
-| `log_level` | `info` | Logging verbosity: `trace` / `debug` / `info` / `warn` / `error` |
-| `watchdog_timeout` | `45` | Seconds of stream silence before a restart is forced. Set to `0` to disable. |
-| `health_interval` | `15` | Seconds between health probes. Lower = faster detection, more CPU. |
+| `log_level` | `info` | `trace` / `debug` / `info` / `warn` / `error` |
+| `watchdog_timeout` | `45` | Seconds of stream silence before a forced restart. `0` = disabled. |
+| `health_interval` | `15` | Seconds between health probes. Lower = faster detection, slightly more CPU. |
 
-**Recommended for aggressive recovery:**
-```
+**For fastest recovery** (detects hangs in ~20s):
+```yaml
 watchdog_timeout: 30
 health_interval: 10
 ```
 
-**To disable the watchdog** (not recommended — this is the whole point):
-```
-watchdog_timeout: 0
-```
+Changes take effect after clicking **Save** and then **Restart** on the add-on Info tab.
 
 ---
 
@@ -306,9 +315,14 @@ curl -X POST http://homeassistant.local:8099/api/cameras/movie_room/control \
 - Ensure the camera's HTTP API is reachable on port 80 (same IP as Baichuan)
 
 **Neolink binary fails to start**
-- Check the log for `neolink exited with code` messages
-- The add-on ships Neolink `0.6.3-rc.3` from the QuantumEntangledAndy fork. If your
+- Check the **Log** tab for `neolink exited with code` messages
+- The add-on ships Neolink `v0.6.3.rc.2` from the QuantumEntangledAndy fork. If your
   camera needs a newer version, file an issue.
+
+**The Log tab is empty**
+- Make sure the add-on is Started (green dot on the Info tab)
+- Try clicking **Refresh** at the top of the Log tab
+- Switch `log_level` to `debug` in the Configuration tab and restart
 
 ---
 

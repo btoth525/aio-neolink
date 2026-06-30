@@ -23,7 +23,7 @@ ENV LANG=C.UTF-8 \
 # GStreamer is the media pipeline Neolink links against. We need plugins-bad for the
 # RTSP server (gstrtsp) and plugins-ugly for H.264 parsing (x264/avdec_h264).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl xz-utils \
+        ca-certificates curl unzip \
         python3 python3-pip \
         gstreamer1.0-plugins-base \
         gstreamer1.0-plugins-good \
@@ -38,7 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Downloads the QuantumEntangledAndy fork release for the target arch.
 # Override at build time to use your own fork:
 #   docker build --build-arg NEOLINK_VERSION=0.6.3-rc.3
-ARG NEOLINK_VERSION="0.6.3-rc.3"
+ARG NEOLINK_VERSION="v0.6.3.rc.2"
 COPY rootfs/fetch-neolink.sh /usr/local/bin/fetch-neolink.sh
 RUN chmod +x /usr/local/bin/fetch-neolink.sh && /usr/local/bin/fetch-neolink.sh
 
