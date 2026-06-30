@@ -1,5 +1,5 @@
 name: aio-neolink
-version: "0.1.4"
+version: "0.1.5"
 slug: aio_neolink
 description: "Reliable Reolink Baichuan-to-RTSP bridge with self-healing watchdog, PTZ/lights/siren control, and a web GUI"
 url: https://github.com/btoth525/aio-neolink
@@ -26,8 +26,8 @@ ports_description:
 
 options:
   log_level: info
-  watchdog_timeout: 45
-  health_interval: 15
+  watchdog_timeout: 120
+  health_interval: 30
 
 schema:
   log_level: list(trace|debug|info|warn|error)

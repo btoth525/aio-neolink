@@ -62,8 +62,8 @@ async def main() -> None:
 
     cam_store = store.CameraStore()
     sup_opts = pipeline.SupervisorOptions(
-        watchdog_timeout=int(opts.get("watchdog_timeout", 45)),
-        health_interval=int(opts.get("health_interval", 15)),
+        watchdog_timeout=int(opts.get("watchdog_timeout", 120)),
+        health_interval=int(opts.get("health_interval", 30)),
     )
     pipe = pipeline.PipelineManager(sup_opts)
     controls = control.ControlRegistry()

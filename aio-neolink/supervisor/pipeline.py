@@ -63,13 +63,26 @@ class PipelineHealth:
 
 @dataclass
 class SupervisorOptions:
-    watchdog_timeout: int = 45       # seconds of silence → trigger restart regardless of failure count
-    health_interval: int = 15        # seconds between probes
-    failures_before_restart: int = 2 # consecutive failures before restarting
+    watchdog_timeout: int = 120      # seconds of *sustained* failure before a restart
+    health_interval: int = 30        # seconds between probes
     rtsp_host: str = "127.0.0.1"
     rtsp_port: int = 8554
     restart_backoff: float = 5.0     # min seconds between full process restarts
     startup_grace: float = 45.0      # seconds after (re)start before probes count as failures
+
+    @property
+    def failures_before_restart(self) -> int:
+        """How many consecutive probe failures justify a restart.
+
+        Derived from watchdog_timeout so a restart only happens after the stream has
+        been failing for roughly that long — NOT on a transient blip. Bouncing the
+        Neolink process is expensive: it drops every connected client (Frigate
+        included) and forces a cold camera re-negotiation, so a too-eager watchdog
+        actively prevents the stream from stabilising. The original outage was ~29
+        hours, so a recovery window measured in a couple of minutes is still a
+        massive improvement while being far gentler on a merely-flaky feed.
+        """
+        return max(2, round(self.watchdog_timeout / max(self.health_interval, 1)))
 
 
 # ---------------------------------------------------------------------------
@@ -373,13 +386,15 @@ class PipelineManager:
             if not cam.enabled:
                 continue
 
-            # Probe a concrete stream path.  GStreamer RTSP aggregate URLs can behave
-            # differently from track-specific paths; mainStream/subStream are always
-            # listed explicitly by Neolink and respond reliably.
-            if cam.stream == "subStream":
-                probe_path = f"{cam.name}/subStream"
-            else:
+            # Probe the sub-stream by preference: it's lower-bitrate with more
+            # frequent keyframes, so it cold-starts faster and is far less likely to
+            # report a false hang than the main stream. A camera pinned to main-only
+            # has no sub mount, so probe main there. (Either way this confirms the
+            # camera connection and Neolink's RTSP delivery are alive.)
+            if cam.stream == "mainStream":
                 probe_path = f"{cam.name}/mainStream"
+            else:
+                probe_path = f"{cam.name}/subStream"
 
             ok, err = await _probe_rtp(
                 self.opts.rtsp_host,
@@ -406,11 +421,17 @@ class PipelineManager:
                 h.last_error = err
                 silent_for = time.monotonic() - h.last_ok if h.last_ok else 1e9
                 log.warning(
-                    "camera %s probe failed: %s — %d in a row, silent %.0fs",
-                    cam.name, err, h.consecutive_failures, silent_for,
+                    "camera %s probe failed: %s — %d/%d in a row, silent %.0fs",
+                    cam.name, err, h.consecutive_failures,
+                    self.opts.failures_before_restart, silent_for,
                 )
-                if (h.consecutive_failures >= self.opts.failures_before_restart
-                        or silent_for >= self.opts.watchdog_timeout):
+                # Restart only after sustained failure. The previous build also
+                # restarted the moment silent_for crossed watchdog_timeout, which
+                # fired on a *single* failure whenever the last success was already
+                # old — turning one slow keyframe into a full process bounce. The
+                # consecutive-failure count alone (derived from watchdog_timeout) is
+                # the gentler, sufficient trigger.
+                if h.consecutive_failures >= self.opts.failures_before_restart:
                     unhealthy.append(cam.name)
 
         if unhealthy:
