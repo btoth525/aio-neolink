@@ -1,65 +1,95 @@
 # Roadmap
 
-This v0.1 is a **scaffold that runs the right shape**, not a finished product. Here's
-the honest state of each piece and what to do next.
+Honest state of the project as of **v0.1.9**: the core mission — a Reolink stream
+that actually holds, with a self-healing watchdog and a working web GUI — is live
+and confirmed working (Neolink rc.3 streaming, VLC holding a clean picture). What's
+left from here is hardening and features, not blockers.
 
-## Done (works as written, given a real Neolink binary)
+## Done
 
-- **HAOS add-on packaging** — `config.yaml`, `build.yaml`, `Dockerfile`, Ingress GUI panel.
-- **Self-healing watchdog** — `pipeline.py` probes each RTSP path with `gst-discoverer`
-  and restarts the pipeline on sustained silence. This is the fix for the exact bug you
-  hit (silent hang, container still "started").
+- **HAOS add-on packaging** — `config.yaml`, `Dockerfile`, Ingress GUI panel,
+  `host_network: true` so Neolink can reach the camera and bind `:8554`.
+- **Real Neolink binary, the version that actually works** — `0.6.3-rc.3`, compiled
+  by this repo's own GitHub Actions (`.github/workflows/build-neolink.yml`) from a
+  pinned upstream commit, published as a release, and downloaded at image-build
+  time. The newest *released* binary (`rc.2`) stutters and hangs on recent Reolink
+  firmware; rc.3 (an in-development version one step ahead of any release) is what
+  the original working add-on ran, and is what this one ships now. No Rust compiles
+  on the Home Assistant device.
+- **Self-healing watchdog** — `pipeline.py` runs a real RTSP+RTP session
+  (`OPTIONS → DESCRIBE → SETUP → PLAY`, then waits for RTP bytes) against each
+  camera every `health_interval` seconds. This is a pure-Python asyncio probe, no
+  external tools — it catches the exact "port open, OPTIONS returns 200, but no
+  frames" hang that caused the original 29-hour outage, which a shallower probe
+  would miss entirely.
+- **Tolerant restart policy** — the watchdog only restarts Neolink after *sustained*
+  failure (`watchdog_timeout / health_interval` consecutive probe failures, 4 by
+  default), not on the first blip. An eager watchdog was found, in practice, to
+  actively prevent a merely-flaky feed from ever stabilizing, since every restart
+  drops all clients (Frigate included) and forces a cold camera renegotiation.
 - **Camera store + TOML generation** — add a camera in the GUI → `neolink.toml`
   regenerated → pipeline restarted. No hand-editing.
-- **REST API + GUI** — list/add/delete cameras, probe capabilities, per-camera health,
-  send IR/spotlight/siren/PTZ.
+- **REST API + GUI** — list/add/delete cameras, probe capabilities, per-camera
+  health, send IR/spotlight/siren/PTZ. Served via HA Ingress with relative paths.
+- **Removed a real regression** — v0.1.3–0.1.8 had a live MJPEG preview in the GUI.
+  It opened its own RTSP connection to the local Neolink instance, which could land
+  mid-negotiation and trip Neolink's own RTSP pipeline
+  (`GStreamer-RTSP-Server-CRITICAL: could not create element`), leaving it dropping
+  frames afterward. Removed entirely in v0.1.9 rather than patched, since holding
+  the stream matters more than a GUI thumbnail.
 
-## Needs real wiring before deploy
+## Needs real-world verification
 
-1. **Neolink binary** — `rootfs/fetch-neolink.sh` currently installs a placeholder.
-   Replace it with a real download of the QuantumEntangledAndy release for your arch,
-   or add a `cargo build` stage. This is the one blocker to a working build.
-2. **Verify the fork's TOML schema** — `config_gen.py` uses the `[[rtsp]]` bind block
-   and `[[cameras]]` shape. Confirm against the exact Neolink version you ship; older
-   versions used a flatter `bind =` at top level. Adjust `render()` accordingly.
-3. **reolink-aio method names** — `control.py` calls `set_ir_lights`, `set_spotlight`,
-   `set_siren`, `set_ptz_command`, and `supported(ch, feature)`. Pin a reolink-aio
-   version and confirm these signatures; the library evolves. Capability flag names
-   (`floodLight` vs `spotlight`, etc.) especially need a real-camera check.
-4. **Battery cameras** — store + TOML support `uid`, but the control plane currently
-   requires a wired address. Battery/UDP control is a follow-up.
+1. **reolink-aio capability flags across more models.** `control.py` calls
+   `Host.get_host_data()`, `get_states()`, `set_ir_lights`, `set_spotlight`,
+   `set_siren`, `set_ptz_command(channel, command=, speed=)`, and
+   `supported(channel, feature)`. Confirmed working against an E1; other Reolink
+   models expose different capability flag names (`floodLight` vs `spotlight`,
+   etc.) and may need adjustment. Pin a reolink-aio version once this is settled.
+2. **Battery cameras** — the store/TOML support `uid` (UDP, no fixed address), but
+   `control.py` currently requires a wired `address`. Battery/UDP control is a
+   follow-up.
+3. **Neolink TOML schema drift.** `config_gen.py` emits a top-level `[[rtsp]]` bind
+   block + `[[cameras]]` blocks — confirmed against the current rc.3 build. Re-check
+   this whenever `NEOLINK_COMMIT` is bumped; the schema has changed between Neolink
+   versions before.
 
-## Reliability iteration (the real prize)
+## The next reliability prize
 
-The watchdog restarts the **whole** Neolink process, because stock Neolink has no
-per-camera control. Two upgrades, in order of payoff:
+The watchdog currently restarts the **whole** Neolink process, because stock
+Neolink exposes no per-camera control. In order of payoff:
 
-- **Per-camera recovery** — once you fork Neolink, add a small control socket (or use
-  its MQTT control surface) so the supervisor can restart a single camera's pipeline
-  instead of bouncing all of them.
-- **In-process frame watchdog** — the most robust fix lives *inside* Neolink: in the
-  GStreamer `appsrc` feed loop (the one from George's blog that pushes camera bytes),
-  track "time since last buffer pushed." If it exceeds a threshold, force a reconnect
-  to the camera rather than waiting for an external probe to notice. This catches the
-  hang at the source. This is the single highest-value change to make in the fork.
+1. **In-process frame watchdog (highest value).** The real fix lives *inside*
+   Neolink's GStreamer `appsrc` feed loop (the loop from George Hilliard's original
+   blog post that pushes camera bytes into the pipeline): track time since the last
+   buffer was pushed, and if it exceeds a threshold, force a camera reconnect *at
+   the source* — catching the hang before any external probe would ever notice it.
+   This requires a small patch to the Neolink fork build.
+2. **Per-camera recovery.** Add a small control surface (or reuse the
+   QuantumEntangledAndy fork's existing MQTT control) so the supervisor can restart
+   one camera's pipeline instead of bouncing every camera whenever any one of them
+   is unhealthy.
 
-## "Best of both worlds" milestones
+## Milestones
 
-- **M1** — this scaffold builds with a real Neolink binary; cameras stream; watchdog
-  recovers a forced hang. (Prove the self-heal with a deliberate `kill -STOP`.)
-- **M2** — GUI probe auto-fills capabilities from a real camera; PTZ/lights/siren work.
-- **M3** — fork Neolink, add the in-process frame watchdog, point `fetch-neolink.sh` at
-  your release. Now recovery is sub-second and per-camera.
-- **M4** — two-way audio: reolink-aio + Neolink's audio backchannel, surfaced in the GUI.
+- **M1 — ✅ done.** Real Neolink binary streams and holds (confirmed via VLC);
+  watchdog recovers a forced hang (`kill -STOP`); web GUI works end-to-end.
+- **M2 — in progress.** reolink-aio capability flags verified across more camera
+  models than just the E1; battery camera control.
+- **M3 — planned.** Fork Neolink, add the in-process frame watchdog + per-camera
+  control surface. Recovery becomes sub-second and per-camera instead of
+  minutes-and-whole-process.
+- **M4 — planned.** Two-way audio: reolink-aio + Neolink's audio backchannel,
+  surfaced as a talk button in the GUI.
 
 ## Testing the self-heal without waiting for a real outage
 
-Once running, simulate today's exact failure mode:
-
 ```bash
-# find the neolink PID inside the addon container, then:
-kill -STOP <neolink_pid>     # freeze it — mimics the silent hang
-# watch the supervisor log: within health_interval*failures it should restart the pipeline
+# find the neolink PID inside the add-on container, then:
+kill -STOP <neolink_pid>     # freeze it — mimics the silent hang, RTSP goes quiet but the PID lives
+
+# watch the supervisor log: within roughly watchdog_timeout seconds (default 120s)
+# it should detect sustained silence and restart the pipeline on its own
 ```
 
-If the camera returns to `live` on its own, the core promise is proven.
+If the camera returns to **Live** on its own, the core promise is proven.

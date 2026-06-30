@@ -1,48 +1,59 @@
 # aio-neolink
 
-> **The Reolink add-on that actually works.** Self-healing streams, full camera
-> control, and a web GUI — all in one Home Assistant add-on.
+> **The Reolink add-on that actually holds the stream.** Self-healing RTSP, full
+> camera control, and a web GUI — one Home Assistant add-on, zero hand-edited TOML.
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](LICENSE)
 [![HA add-on](https://img.shields.io/badge/Home%20Assistant-Add--on-41BDF5?logo=home-assistant)](https://github.com/btoth525/aio-neolink)
+[![Neolink](https://img.shields.io/badge/Neolink-0.6.3--rc.3-orange)](https://github.com/QuantumEntangledAndy/neolink)
 
 ---
 
 ## What this is
 
-**aio-neolink** is a Home Assistant OS add-on that bridges Reolink cameras using the
-**Baichuan protocol (port 9000)** to RTSP — and then keeps those streams alive
-automatically, forever.
+**aio-neolink** is a Home Assistant OS add-on that bridges Reolink cameras speaking
+the **Baichuan protocol (port 9000)** to standard RTSP — and then keeps that stream
+alive automatically, instead of quietly going dark for hours.
 
-It replaces both **Neolink** (which silently hangs and has no GUI) and the standalone
-**reolink-aio** integration for camera control, fusing them into a single, hardened
-add-on that does more than either project alone:
+It fuses two proven open-source projects with a hardened supervisor on top, so it
+does more than any one of them alone:
 
 | What you get | Stock Neolink | reolink-aio | **aio-neolink** |
 |---|:---:|:---:|:---:|
 | Reolink Baichuan → RTSP stream | ✅ | ❌ | ✅ |
 | Self-healing (auto-restart on silent hang) | ❌ | ❌ | ✅ |
-| RTP-level health probe (catches silent hangs) | ❌ | ❌ | ✅ |
+| RTP-level health probe (catches silent hangs OPTIONS can't) | ❌ | ❌ | ✅ |
+| Tolerant watchdog (won't bounce a merely-flaky feed) | ❌ | ❌ | ✅ |
 | Web GUI — add cameras without editing files | ❌ | ❌ | ✅ |
 | PTZ control | ❌ | ✅ | ✅ |
 | IR / spotlight / siren | ❌ | ✅ | ✅ |
 | Camera capability auto-detection | ❌ | ✅ | ✅ |
 | Works with Frigate (no reconfiguration) | ✅ | ❌ | ✅ |
 | Drop-in RTSP on `:8554` | ✅ | ❌ | ✅ |
+| Binary built by CI, not compiled on your HA box | ❌ | n/a | ✅ |
 
 ---
 
 ## The problem this solves
 
-Stock Neolink hangs silently. The process stays alive — the container reports
-`started` — but the RTSP output stops producing frames. Home Assistant's add-on
-watchdog only catches a *fully dead* process, so the camera can sit `unavailable`
-for hours with no automatic recovery.
+Stock Neolink hangs silently. The process stays alive — the add-on container still
+reports `started` — but the RTSP output stops producing frames. Home Assistant's
+own add-on watchdog only catches a *fully dead* process, so the camera can sit
+`unavailable` for hours (in the incident that started this project: **29 hours**)
+with zero automatic recovery.
 
-**aio-neolink probes at the RTP level.** It doesn't just check if the port is open
-or if RTSP OPTIONS returns 200. It completes a full RTSP session (OPTIONS → DESCRIBE →
-SETUP → PLAY) and waits for actual RTP data bytes. If frames stop flowing, it knows —
-and it restarts the pipeline automatically, typically within 15–30 seconds.
+**aio-neolink probes at the RTP level, not just the TCP/HTTP level.** It doesn't
+just check whether the port is open or whether RTSP `OPTIONS` returns 200 — both of
+those stay healthy during the exact hang that caused the outage. It runs a complete
+RTSP session (`OPTIONS → DESCRIBE → SETUP → PLAY`) and waits for actual RTP bytes
+to arrive. No bytes, no health — and after a few minutes of *sustained* silence, it
+restarts the pipeline on its own.
+
+That "sustained" qualifier matters: restarting Neolink drops every connected client
+(Frigate included) and forces a cold camera re-negotiation, so a hair-trigger
+watchdog would actively prevent a merely-flaky feed from ever settling. aio-neolink
+only restarts after the stream has been silent for a stretch — gentle by default,
+still a massive improvement over a 29-hour outage with no recovery at all.
 
 ---
 
@@ -53,28 +64,50 @@ Reolink camera
 (Baichuan :9000)
       │
       ▼
-┌─────────────────────────────────────────────────┐
-│                aio-neolink add-on                │
-│                                                  │
-│  ┌───────────────────┐   ┌─────────────────────┐ │
-│  │  Neolink (Rust)   │   │ Supervisor (Python)  │ │
-│  │  Baichuan → RTSP  │◄──│ • RTP health probe   │ │
-│  │  serves :8554     │   │ • auto-restart       │ │
-│  └───────────────────┘   │ • config generation  │ │
-│                          └──────────┬───────────┘ │
-│  ┌───────────────────┐              │              │
-│  │  reolink-aio      │◄─────────────┘              │
-│  │  PTZ / IR /       │   FastAPI REST + Web GUI    │
-│  │  spotlight / siren│   served via HA Ingress     │
-│  └───────────────────┘                            │
-└──────────────────────┬──────────────────────────┘
-                       │ RTSP :8554/<camera_name>
-                       ▼
-                    Frigate / go2rtc / Blue Iris
+┌──────────────────────────────────────────────────┐
+│                aio-neolink add-on                 │
+│                                                    │
+│  ┌────────────────────┐   ┌──────────────────────┐│
+│  │  Neolink (Rust)     │   │ Supervisor (Python)  ││
+│  │  Baichuan → RTSP    │◄──│ • RTSP+RTP probe     ││
+│  │  serves :8554       │   │ • sustained-failure  ││
+│  │  (rc.3, CI-built)   │   │   restart only       ││
+│  └────────────────────┘   │ • config generation   ││
+│                            └──────────┬───────────┘│
+│  ┌────────────────────┐               │            │
+│  │  reolink-aio        │◄──────────────┘            │
+│  │  PTZ / IR /         │   FastAPI REST + Web GUI   │
+│  │  spotlight / siren  │   served via HA Ingress    │
+│  └────────────────────┘                            │
+└──────────────────────┬─────────────────────────────┘
+                        │ RTSP :8554/<camera_name>
+                        ▼
+                 Frigate / go2rtc / Blue Iris
 ```
 
 **Frigate needs zero reconfiguration.** The RTSP URL
 (`rtsp://<ha-ip>:8554/<camera_name>`) is identical to what stock Neolink served.
+
+Neolink stays exactly what it's always been — the hard, reverse-engineered Baichuan
+client — this project never tries to replace it. aio-neolink adds the supervisor,
+the control plane, and the GUI around it.
+
+---
+
+## How Neolink gets onto your device
+
+The newest *released* Neolink binary (`v0.6.3.rc.2`) connects to recent Reolink
+firmware fine but then delivers video only intermittently and hangs — that's the
+GStreamer-level fault, not a watchdog bug, confirmed by reproducing it with
+GStreamer's own `rtspsrc` client outside this add-on entirely. The fix is
+**`0.6.3-rc.3`**, an in-development version one step ahead of any release.
+
+Rather than compile Rust on your Home Assistant box, **this repo's own GitHub
+Actions workflow** (`.github/workflows/build-neolink.yml`) compiles Neolink rc.3
+from a pinned upstream commit — natively for both amd64 and arm64 — and publishes
+the binaries to this repo's releases. The add-on's Dockerfile just downloads the
+~12 MB binary for your architecture at build time. Installing or updating the
+add-on is fast; nothing on your HA device compiles anything.
 
 ---
 
@@ -97,27 +130,31 @@ Reolink camera
 ### Step 2 — Install the add-on
 
 1. Click **aio-neolink** in the store
-2. Click **Install** and wait for the image to download (~1–2 min on first install)
+2. Click **Install** — this downloads the prebuilt image; it's a fast install,
+   not a Rust compile.
 
 ### Step 3 — Configure and start
 
-**Configuration tab** — three options, all optional to change:
+**Configuration tab** — all options are optional to change:
 
 | Option | Default | What it does |
 |---|---|---|
 | `log_level` | `info` | `debug` for more detail, `warn` for quiet |
-| `watchdog_timeout` | `45` | Seconds of stream silence before forced restart |
-| `health_interval` | `15` | Seconds between health probes |
+| `watchdog_timeout` | `120` | Seconds of *sustained* stream silence before a forced restart. `0` disables the watchdog. |
+| `health_interval` | `30` | Seconds between health probes. |
 
 1. Toggle **Show in sidebar** ON — adds the GUI panel to your HA sidebar
 2. Click **Start**
 3. Open the **Log** tab and confirm you see:
    ```
-   ============================================================
-   aio-neolink starting
-   ============================================================
+   ------------------------------------------------------------
+    aio-neolink starting
+      neolink       : neolink 0.6.3-rc.3
+   ------------------------------------------------------------
    aio-neolink ready — watchdog active, Web UI on :8099
    ```
+   The `neolink 0.6.3-rc.3` line is the confirmation you're running the fixed
+   binary, not the stuttering `rc.2` release.
 
 ### Step 4 — Add your cameras via the Web UI
 
@@ -126,7 +163,8 @@ Open the GUI in one of two ways:
 - Click the **Open Web UI** button on the add-on Info tab
 
 1. Click **+ Add a camera**
-3. Fill in:
+2. Fill in:
+
    | Field | Example | Notes |
    |---|---|---|
    | Name | `movie_room` | Becomes the RTSP path — use only letters, numbers, `_`, `-` |
@@ -135,16 +173,15 @@ Open the GUI in one of two ways:
    | Username | `admin` | Camera login |
    | Password | `yourpassword` | Camera password |
    | Streams | `Main + sub` | Serve both streams; pick one if your camera is single-stream |
-4. Click **Test connection** — this probes the camera and shows what features it
-   supports (PTZ, spotlight, siren, IR)
-5. Click **Save camera**
 
-The add-on will regenerate its config and connect immediately. The camera card will
-show **Live** (green) once the stream is up.
+3. Click **Test connection** — probes the camera and shows what features it
+   supports (PTZ, spotlight, siren, IR)
+4. Click **Save camera**
+
+The add-on regenerates its Neolink config and connects immediately. The camera card
+shows **Live** (cyan) once the stream is up.
 
 ### Step 5 — Point Frigate at the RTSP stream
-
-If you have Frigate, add this to your `frigate.yml`:
 
 ```yaml
 cameras:
@@ -157,8 +194,12 @@ cameras:
             - record
 ```
 
-Replace `192.168.1.x` with your Home Assistant host IP. The stream will be identical
-to what Neolink served — no other changes needed.
+Replace `192.168.1.x` with your Home Assistant host IP. The stream is identical to
+what Neolink served before — nothing else in Frigate's config needs to change.
+
+> **Sanity check before wiring up Frigate:** point VLC at
+> `rtsp://192.168.1.x:8554/movie_room` from another machine on your network. If VLC
+> holds a clean picture, Neolink is healthy and Frigate will connect the same way.
 
 ---
 
@@ -169,41 +210,43 @@ All options live in the add-on's **Configuration tab** in HA:
 | Option | Default | Description |
 |---|---|---|
 | `log_level` | `info` | `trace` / `debug` / `info` / `warn` / `error` |
-| `watchdog_timeout` | `45` | Seconds of stream silence before a forced restart. `0` = disabled. |
-| `health_interval` | `15` | Seconds between health probes. Lower = faster detection, slightly more CPU. |
-
-**For fastest recovery** (detects hangs in ~20s):
-```yaml
-watchdog_timeout: 30
-health_interval: 10
-```
+| `watchdog_timeout` | `120` | Seconds of *sustained* stream silence before a forced restart. `0` disables the watchdog entirely. |
+| `health_interval` | `30` | Seconds between health probes. The number of consecutive failures needed to trigger a restart is derived as `watchdog_timeout / health_interval` (4, by default). |
 
 Changes take effect after clicking **Save** and then **Restart** on the add-on Info tab.
+
+**Why the defaults are this gentle:** a too-eager watchdog is worse than no
+watchdog. Restarting Neolink drops every connected client (Frigate included) and
+forces the camera to renegotiate from scratch, so bouncing on the first hiccup
+actively prevents a merely-flaky feed from ever settling. The defaults wait for
+roughly two minutes of real, sustained silence — still an enormous improvement over
+the 29-hour outage with zero recovery that this project exists to fix.
 
 ---
 
 ## How the self-heal works
 
-Every `health_interval` seconds, the supervisor runs a full RTSP health check on each
-camera stream:
+Every `health_interval` seconds, the supervisor runs a full RTSP health check
+against the live stream:
 
 ```
 1. TCP connect to localhost:8554
 2. Send RTSP OPTIONS  →  expect 200 OK
 3. Send RTSP DESCRIBE →  expect SDP with media tracks
-4. Send RTSP SETUP    →  request interleaved TCP transport
+4. Send RTSP SETUP    →  request interleaved TCP transport on the actual track URL
 5. Send RTSP PLAY     →  start the stream
-6. Wait up to 10s for any RTP byte
+6. Wait up to 20s for any RTP byte
 ```
 
-If step 6 times out — meaning Neolink's RTSP server is responding but not sending
-frames (the exact hang that caused the original silent outage) — it counts as a
-failure. After `failures_before_restart` (default: 2) consecutive failures, or after
-`watchdog_timeout` seconds of total silence, the supervisor restarts Neolink and the
-stream recovers.
+If step 6 times out — meaning Neolink's RTSP server is responding to session setup
+but not sending frames, the exact hang that caused the original silent outage — it
+counts as one failure. After `watchdog_timeout / health_interval` consecutive
+failures, the supervisor restarts Neolink, and the failure counter resets so a
+single post-restart hiccup can't immediately re-trigger another restart.
 
-**In plain terms:** the camera goes from `unavailable` to `live` in ~30 seconds
-instead of ~29 hours.
+A brand-new restart also gets a 45-second grace period where probe failures are
+logged but not counted — Neolink needs time to renegotiate with the camera before
+its RTSP server is fully serving frames.
 
 ---
 
@@ -219,32 +262,34 @@ docker exec -it $(docker ps --filter name=aio_neolink -q) bash
 kill -STOP $(pidof neolink)
 ```
 
-Watch the add-on log. Within one or two `health_interval` cycles (~15–30 seconds)
-you'll see:
+Watch the add-on log. Within roughly `watchdog_timeout` seconds you'll see:
 
 ```
-camera movie_room probe failed: no RTP data within 10s (stream hung) — 1 in a row
-camera movie_room probe failed: no RTP data within 10s (stream hung) — 2 in a row
+camera movie_room probe failed: no RTP data within 20s (stream may be hung) — 1/4 in a row, silent 30s
+camera movie_room probe failed: no RTP data within 20s (stream may be hung) — 2/4 in a row, silent 60s
+camera movie_room probe failed: no RTP data within 20s (stream may be hung) — 3/4 in a row, silent 90s
+camera movie_room probe failed: no RTP data within 20s (stream may be hung) — 4/4 in a row, silent 120s
+stopping neolink (SIGTERM)
 neolink (re)started: unhealthy cameras: ['movie_room']
 ```
 
-The camera card will briefly show **Recovering** (amber) and return to **Live**
-(green) within seconds of the restart.
+The camera card briefly shows **Recovering** (amber) and returns to **Live** (cyan)
+once the new Neolink process reconnects to the camera.
 
 ---
 
 ## Web GUI
 
-The GUI is served via Home Assistant Ingress — it appears directly in the HA sidebar,
-authenticated by HA, no port forwarding needed.
+The GUI is served via Home Assistant Ingress — it appears directly in the HA
+sidebar, authenticated by HA, no port forwarding needed.
 
 **Camera card states:**
 
 | Color | Meaning |
 |---|---|
-| 🟢 Cyan — **Live** | Stream is healthy, RTP flowing |
-| 🟡 Amber — **Recovering** | First probe failure, restart in progress |
-| 🔴 Red — **Down** | Sustained failure, check camera IP/power |
+| 🔵 Cyan — **Live** | Stream is healthy, RTP flowing |
+| 🟡 Amber — **Recovering** | A probe failure or two, watching to see if it self-resolves |
+| 🔴 Red — **Down** | Sustained failure — check camera power/network, or wait for auto-recovery |
 
 **Controls on each card:**
 - **IR** — toggle infrared night vision
@@ -253,8 +298,15 @@ authenticated by HA, no port forwarding needed.
 - **◀ ▶** — PTZ nudge left / right (sends PTZ command + auto-Stop after 600ms)
 - **Remove** — delete the camera and stop its stream
 
-Controls are only shown as active (not greyed out) for features the camera actually
+Controls only appear active (not greyed out) for features the camera actually
 reported supporting during the probe.
+
+There's deliberately **no live video preview** in the GUI. An MJPEG preview was
+tried and removed: it opened its own RTSP connection to the local Neolink instance,
+which could land mid-negotiation and destabilize the very stream Frigate depends
+on. Holding that stream is the entire point of this add-on, so nothing in the GUI
+opens a second connection to it. Use VLC (`rtsp://<ha-ip>:8554/<camera_name>`) to
+eyeball a feed instead — that's exactly what Frigate is doing under the hood.
 
 ---
 
@@ -304,20 +356,30 @@ curl -X POST http://homeassistant.local:8099/api/cameras/movie_room/control \
 - Check the add-on log (Settings → Add-ons → aio-neolink → Log) for the Neolink
   output
 
-**Stream shows in the GUI but Frigate can't connect**
+**Stream shows healthy in the GUI but Frigate can't connect**
 - Confirm `host_network: true` is set (it is by default)
-- Check that port 8554 is not blocked by a firewall on your HA host
-- Try `rtsp://192.168.1.x:8554/movie_room` in VLC from another machine first
+- Check that port 8554 isn't blocked by a firewall on your HA host
+- Try `rtsp://192.168.1.x:8554/movie_room` in VLC from another machine first — if
+  VLC holds it, Frigate's config (not the stream) is the problem
+
+**Stream connects then drops repeatedly**
+- Check the **Log** tab for `neolink : neolink 0.6.3-rc.3` at startup — if it shows
+  `0.6.3-rc.2` instead, the add-on downloaded the wrong release; reinstall to pick
+  up the latest version
+- A camera that's also being hit by another client (an old add-on, a phone app
+  still connected) can starve the RTSP session; make sure nothing else is pulling
+  the Baichuan connection on port 9000
 
 **PTZ / lights not working**
 - These require the camera to support the feature — click **Test connection** to see
   what your model actually supports; unsupported features are greyed out
 - Ensure the camera's HTTP API is reachable on port 80 (same IP as Baichuan)
 
-**Neolink binary fails to start**
-- Check the **Log** tab for `neolink exited with code` messages
-- The add-on ships Neolink `v0.6.3.rc.2` from the QuantumEntangledAndy fork. If your
-  camera needs a newer version, file an issue.
+**Neolink binary fails to start / fetch-neolink errors in the build log**
+- Check the **Log** tab for `neolink exited with code` or `fetch-neolink` messages
+- The add-on downloads a prebuilt binary from this repo's `neolink-rc3` release
+  (built by `.github/workflows/build-neolink.yml`). If that release is missing an
+  asset for your architecture, file an issue.
 
 **The Log tab is empty**
 - Make sure the add-on is Started (green dot on the Info tab)
@@ -334,7 +396,7 @@ curl -X POST http://homeassistant.local:8099/api/cameras/movie_room/control \
 4. Re-add each camera via the GUI using the same names
 5. Update Frigate's RTSP URLs if the host IP changes (port 8554 stays the same)
 
-Your Frigate entity names (`camera.movie_room`, etc.) will not change.
+Your Frigate entity names (`camera.movie_room`, etc.) won't change.
 
 ---
 
@@ -342,11 +404,14 @@ Your Frigate entity names (`camera.movie_room`, etc.) will not change.
 
 See [`ROADMAP.md`](ROADMAP.md) for the full list. Top priorities:
 
-- **M2** — Verify reolink-aio API signatures against a real camera; wire up any
-  missing PTZ/light calls
-- **M3** — Fork Neolink and add an in-process frame watchdog (catches hangs *before*
-  the external RTP probe notices — sub-second recovery)
-- **M4** — Two-way audio via the Neolink backchannel + a talk button in the GUI
+- **Verify reolink-aio capability flags** across more camera models (PTZ/light/siren
+  naming differs by model — only confirmed against an E1 so far)
+- **Fork Neolink and add an in-process frame watchdog** — catches a hang *inside*
+  Neolink's own GStreamer feed loop, before the external RTP probe would ever
+  notice. Sub-second recovery instead of minutes.
+- **Per-camera restart** instead of bouncing the whole Neolink process when only
+  one camera is unhealthy
+- **Two-way audio** via the Neolink backchannel + a talk button in the GUI
 
 ---
 

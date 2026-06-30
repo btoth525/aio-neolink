@@ -100,7 +100,7 @@ aio-neolink/
     ├── Dockerfile               ← GStreamer runtime + Neolink binary + Python control plane
     ├── run.sh                   ← entrypoint → launches supervisor.main
     ├── rootfs/
-    │   └── fetch-neolink.sh     ← ⚠ installs a PLACEHOLDER binary — must be replaced (see §6.1)
+    │   └── fetch-neolink.sh     ← downloads the CI-built Neolink rc.3 binary for BUILD_ARCH
     ├── supervisor/
     │   ├── main.py              ← wires store + pipeline + controls + watchdog + API; owns the event loop
     │   ├── pipeline.py          ← ★ the self-heal: runs Neolink, probes RTSP health, restarts on hang
@@ -113,32 +113,42 @@ aio-neolink/
         ├── index.html           ← "add a camera" GUI
         ├── app.js               ← fetches cameras + health, renders cards, add/probe/control/delete
         └── style.css            ← "signal room" theme; cyan=live, amber=recovering, red=down
+.github/workflows/
+└── build-neolink.yml            ← CI: compiles Neolink rc.3 (amd64+arm64) → publishes to the
+                                    'neolink-rc3' release; fetch-neolink.sh downloads from there
 ```
 
-★ = the file that delivers the core promise. ⚠ = the one blocker to a real build.
+★ = the file that delivers the core promise.
 
 ---
 
 ## 6. Work order (do these in this order)
 
-### 6.1 ✅ DONE (v0.1.6) — build a real Neolink binary from source
-The `Dockerfile` now compiles Neolink in a multi-stage builder from a **pinned master
-commit** (`6e05e7844b5b…`, Cargo.toml version **0.6.3-rc.3**) and copies the binary into
-the runtime image. `rootfs/fetch-neolink.sh` is retained but **no longer used**.
+### 6.1 ✅ DONE (v0.1.8) — ship Neolink rc.3, built by this repo's own CI
+`.github/workflows/build-neolink.yml` compiles Neolink from a **pinned master commit**
+(`6e05e7844b5b…`, Cargo.toml version **0.6.3-rc.3**) inside a `rust:slim-bookworm`
+container, natively for both amd64 and arm64 (no emulation), and publishes the
+binaries to this repo's `neolink-rc3` release. `rootfs/fetch-neolink.sh` downloads
+the asset matching `BUILD_ARCH` at image-build time — the **Home Assistant device
+never compiles anything**, just downloads a ~12 MB binary.
 
-Why source, not a release: the newest *released* asset is `v0.6.3.rc.2` (commit
-`7158943`). On the target E1 (firmware `v3.2.0.4858`, 2025-08) rc.2 connects, logs in,
-and lists `/movie-room/mainStream` etc. as available — but then **delivers RTP only
+Why rc.3, not the newest *release* (rc.2, commit `7158943`): on the target E1
+(firmware `v3.2.0.4858`, 2025-08) rc.2 connects, logs in, and lists
+`/movie-room/mainStream` etc. as available — but then **delivers RTP only
 intermittently and hangs after ~30 s**. GStreamer's own `rtspsrc` (the proven client)
 fails identically with *"Could not receive message (Timeout while waiting for server
-response) … pipeline doesn't want to preroll"*, proving the fault is in Neolink, not the
-watchdog probe. The original "Neolink-latest" add-on that worked on this exact camera
-reported `0.6.3-rc.3` — i.e. it was a **source build of master**, which is what we now
-reproduce. To move Neolink forward, bump `NEOLINK_COMMIT` in the Dockerfile.
+response) … pipeline doesn't want to preroll"*, proving the fault is in Neolink, not
+the watchdog probe. The original "Neolink-latest" add-on that worked on this exact
+camera reported `0.6.3-rc.3` — i.e. it was a **source build of master**, which is
+what CI now reproduces and publishes.
 
-Trade-off: the first image build compiles Rust (several minutes natively, longer under
-arch emulation) and wants ~2-4 GB RAM. Docker layer caching means it only recompiles
-when `NEOLINK_COMMIT` or the build deps change; Python-only edits rebuild fast.
+To move Neolink forward: bump `NEOLINK_COMMIT` in `build-neolink.yml`, push to `main`
+(the workflow runs on every push to that file, or via `workflow_dispatch`), then
+rebuild the add-on once the new release asset is live.
+
+An earlier iteration (v0.1.6–0.1.7) compiled Neolink in a Dockerfile build stage
+directly on the HA device — that approach still exists in git history if on-device
+compilation is ever preferred over downloading a CI artifact.
 
 ### 6.2 Verify the two external contracts against reality
 These were written from docs/memory and **must be checked against the actual versions
@@ -199,6 +209,14 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
   `control.py` currently requires a wired address — battery control is a TODO.
 - **Watchdog restart backoff** (`restart_backoff`, default 5s) prevents restart loops —
   don't remove it.
+- **No GUI-side RTSP client.** v0.1.3–0.1.8 had a live MJPEG preview in the web GUI
+  (first via ffmpeg, then via `gst-launch`). Both implementations opened a second
+  RTSP connection to Neolink that could land mid-negotiation and trip Neolink's own
+  RTSP pipeline (`GStreamer-RTSP-Server-CRITICAL: could not create element`, followed
+  by dropped frames). It was removed in v0.1.9. **Do not re-add a preview/snapshot
+  feature that opens its own RTSP connection to the local Neolink instance** without
+  first proving — with real logs — that it cannot destabilize the stream Frigate
+  depends on. That stream holding is the entire point of this project.
 - **Licensing:** Neolink is GPL-3.0. Keep this repo GPL-3.0-compatible.
 - **Placeholders:** all replaced with the real owner (`btoth525`) across `config.yaml`,
   `repository.yaml`, `build.yaml`, and `README.md`. Nothing left to fill in.
@@ -211,7 +229,12 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
   hard reverse-engineered part; the architecture deliberately keeps Neolink for video.
 - Don't replace the relative GUI paths with absolute ones (breaks Ingress).
 - Don't make the watchdog restart on a single probe failure — require sustained failure
-  (`failures_before_restart`) to avoid bouncing on transient blips.
+  (`failures_before_restart`, derived from `watchdog_timeout / health_interval`) to
+  avoid bouncing on transient blips. Restarting Neolink drops every connected client
+  (Frigate included) and forces a cold camera re-negotiation, so an eager watchdog
+  actively prevents a merely-flaky feed from ever stabilising.
+- Don't add anything to the image that opens its own RTSP connection to the local
+  Neolink instance (see §7) — it has already caused a real regression once.
 - Don't store secrets anywhere outside `/data`.
 
 ---
@@ -228,6 +251,8 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
 
 ---
 
-*Last updated: v0.1.6 — Neolink now builds from source (rc.3) to fix intermittent
-stream hangs; watchdog made tolerant (sustained-failure only); web GUI gained a
-gst-launch live preview. Keep this current — it's the contract between sessions.*
+*Last updated: v0.1.9 — Neolink rc.3 is now built by this repo's own CI and
+downloaded at image-build time (no on-device compile); watchdog is sustained-failure
+only (120s / 30s interval defaults); the live preview was removed after it was found
+to destabilize Neolink's own RTSP pipeline. Confirmed working: VLC holds the stream
+served by rc.3. Keep this current — it's the contract between sessions.*
