@@ -14,6 +14,12 @@
 #   2. A Python control plane (reolink-aio + FastAPI): PTZ / IR / spotlight / siren,
 #      a self-healing health watchdog, and the web GUI.
 
+# BUILD_FROM is supplied by the Home Assistant builder and used in stage 2's FROM.
+# It MUST be declared here in the global scope (before the first FROM) — an ARG
+# declared only just before stage 2 would not receive the --build-arg value, because
+# stage 1's FROM already opened a build stage.
+ARG BUILD_FROM
+
 # ---------------------------------------------------------------------------
 # Stage 1 — compile Neolink from source (Rust + GStreamer)
 # ---------------------------------------------------------------------------
@@ -61,7 +67,6 @@ RUN cargo build --release \
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime image (HA base + GStreamer runtime + Python control plane)
 # ---------------------------------------------------------------------------
-ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
 ENV LANG=C.UTF-8 \
