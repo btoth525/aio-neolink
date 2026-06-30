@@ -2,7 +2,7 @@ name: aio-neolink
 version: "0.1.0"
 slug: aio_neolink
 description: Reliable Reolink Baichuan-to-RTSP bridge with self-healing, PTZ/audio control, and a web GUI
-url: https://github.com/YOUR_GITHUB_USERNAME/aio-neolink
+url: https://github.com/btoth525/aio-neolink
 arch:
   - aarch64
   - amd64
@@ -28,8 +28,7 @@ ports_description:
 
 # Camera definitions, credentials, and supervisor state live in /data so they survive
 # restarts and updates.
-map:
-  - addon_config:rw
+startup: services
 
 options:
   log_level: info
