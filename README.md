@@ -405,9 +405,12 @@ curl -X POST http://homeassistant.local:8099/api/cameras/movie_room/control \
   supervisor restarts it immediately when this happens, no need to wait. Versions
   before go2rtc was put in front of Neolink (see [Architecture](#architecture))
   could trigger this crash themselves as soon as Frigate connected — Neolink's RTSP
-  server can't safely handle more than one simultaneous client at all. If you're on
-  a version with go2rtc and still see this, check the **Log** tab for `[go2rtc]`
-  lines: Neolink should now only ever have go2rtc as a client.
+  server can't safely handle more than one simultaneous client at all. Versions
+  before v0.1.12 could *still* hit this even with go2rtc in front, because go2rtc's
+  own default two-way-audio ("backchannel") probe against Neolink counted as a
+  second client all by itself; v0.1.12 disables that probe. Make sure you're on
+  0.1.12+ (check the **Log** tab for `[go2rtc]` lines — Neolink should now only
+  ever have go2rtc as a client, with no backchannel negotiation attempted).
 - **Frigate has a camera pointed at this add-on that isn't actually configured
   here.** That shows up in Frigate's own log as `method DESCRIBE failed: 404 Not
   Found` repeating every ~20 seconds for a camera name you didn't add via this

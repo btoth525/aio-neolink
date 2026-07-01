@@ -45,9 +45,18 @@ GO2RTC_API_ADDR = os.environ.get("GO2RTC_API_ADDR", "127.0.0.1:1984")
 
 
 def _source_stream(cam: Camera) -> str:
-    """Which of Neolink's per-camera mounts go2rtc should pull from."""
+    """Which of Neolink's per-camera mounts go2rtc should pull from.
+
+    #backchannel=0 is required, not optional: go2rtc's RTSP source attempts an
+    ONVIF Profile T two-way-audio backchannel negotiation by default, which means
+    a SECOND connection/negotiation attempt against the source on top of the main
+    pull. Neolink doesn't support that and doesn't handle it gracefully — this is
+    almost certainly what let a crash happen even with go2rtc as the "only"
+    client, since go2rtc itself was the second connection. Two-way audio isn't
+    implemented yet anyway (see ROADMAP.md M4), so there's nothing to lose here.
+    """
     leaf = "mainStream" if cam.stream != "subStream" else "subStream"
-    return f"rtsp://{config_gen.RTSP_BIND_ADDR}:{config_gen.RTSP_PORT}/{cam.name}/{leaf}"
+    return f"rtsp://{config_gen.RTSP_BIND_ADDR}:{config_gen.RTSP_PORT}/{cam.name}/{leaf}#backchannel=0"
 
 
 def render(cameras: list[Camera]) -> str:

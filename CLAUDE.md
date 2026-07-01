@@ -229,22 +229,37 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
      same crash still happened with a single persistent watchdog connection plus
      Frigate. This proved the bug was never about reconnect churn: Neolink can't
      tolerate 2 *simultaneous* clients on one camera, full stop.
-  4. **v0.1.11 fixed it architecturally.** go2rtc (the same restream server Frigate
-     bundles for other camera types) now sits between Neolink and everyone else.
-     `config_gen.py` binds Neolink to `127.0.0.1:18554` (localhost-only, internal —
-     see the port comment there for why 18554 specifically, to avoid go2rtc's own
-     default ports). `restream_gen.py`/`restream.py` run go2rtc as a second
-     subprocess that pulls Neolink's one stream and republishes it on the public
-     `:8554` Frigate has always used. The watchdog (`pipeline.py`,
-     `_CameraMonitor`) now watches go2rtc's public endpoint, not Neolink directly —
-     Neolink has exactly one client (go2rtc) for its entire lifetime, and go2rtc is
-     purpose-built to safely fan that one feed out to any number of downstream
-     consumers (Frigate, VLC, the watchdog itself).
+  4. **v0.1.11 fixed the architecture, but the crash still happened.** go2rtc (the
+     same restream server Frigate bundles for other camera types) was put between
+     Neolink and everyone else. `config_gen.py` binds Neolink to `127.0.0.1:18554`
+     (localhost-only, internal — see the port comment there for why 18554
+     specifically, to avoid go2rtc's own default ports). `restream_gen.py`/
+     `restream.py` run go2rtc as a second subprocess that pulls Neolink's one
+     stream and republishes it on the public `:8554` Frigate has always used. This
+     was the right architecture, but the exact same crash still reproduced —
+     because go2rtc itself was silently the second client.
+  5. **v0.1.12 found why: go2rtc's own backchannel probe.** go2rtc's RTSP source
+     attempts an ONVIF Profile T two-way-audio backchannel negotiation by default
+     — a second connection/negotiation on top of the main pull — unless the source
+     URL has `#backchannel=0` appended (go2rtc's own docs recommend this suffix
+     for other camera types with the same problem). Neolink doesn't support that
+     negotiation and doesn't handle it gracefully, so go2rtc's default behavior
+     was itself creating the "second simultaneous client" that crashes Neolink —
+     with zero external client (Frigate) even needed to trigger it.
+     `restream_gen._source_stream()` now appends `#backchannel=0` to every camera
+     source URL. Two-way audio isn't implemented yet anyway (§6.6/M4).
+
+  The watchdog (`pipeline.py`, `_CameraMonitor`) watches go2rtc's public endpoint,
+  not Neolink directly — Neolink has exactly one client (go2rtc) for its entire
+  lifetime, and go2rtc is purpose-built to safely fan that one feed out to any
+  number of downstream consumers (Frigate, VLC, the watchdog itself).
 
   **Do not connect anything directly to Neolink's internal RTSP port again** —
   not the GUI, not the watchdog, nothing — without first proving, with real logs
   and Frigate connected simultaneously, that Neolink can tolerate it. It has failed
-  this test three times. Route everything through go2rtc instead.
+  this test three times. Route everything through go2rtc instead — and if go2rtc's
+  own config for a source ever changes, re-check whether backchannel negotiation
+  got re-enabled.
 - **Licensing:** Neolink is GPL-3.0. Keep this repo GPL-3.0-compatible.
 - **Placeholders:** all replaced with the real owner (`btoth525`) across `config.yaml`,
   `repository.yaml`, `build.yaml`, and `README.md`. Nothing left to fill in.
@@ -285,12 +300,16 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
 
 ---
 
-*Last updated: v0.1.11 — go2rtc now sits between Neolink and the world (Neolink is
+*Last updated: v0.1.12 — go2rtc now sits between Neolink and the world (Neolink is
 localhost-only, internal port 18554; go2rtc republishes on the public :8554
 Frigate has always used) because Neolink was proven, by direct testing, unable to
 safely serve more than one simultaneous RTSP client on the same camera — not a
 churn issue, confirmed even after the watchdog was rewritten to hold a single
-persistent connection. The watchdog now watches go2rtc's public endpoint instead of
-Neolink directly. Neolink rc.3 is still built by this repo's own CI and downloaded
-at image-build time (no on-device compile). Keep this current — it's the contract
+persistent connection. Putting go2rtc in front (v0.1.11) was the right
+architecture but the crash still reproduced, because go2rtc's own default
+ONVIF backchannel (two-way-audio) negotiation against Neolink was itself acting as
+a second client; v0.1.12 disables it (`#backchannel=0` on every source URL in
+restream_gen.py). The watchdog watches go2rtc's public endpoint instead of Neolink
+directly. Neolink rc.3 is still built by this repo's own CI and downloaded at
+image-build time (no on-device compile). Keep this current — it's the contract
 between sessions.*
