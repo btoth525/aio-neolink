@@ -345,7 +345,25 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
 
 ---
 
-*Last updated: v0.1.19 — the persistent RTSP DESCRIBE 404 that blocked the stream
+*Last updated: v0.1.21 — the persistent DESCRIBE 404 was ultimately traced past the
+watchdog fix (v0.1.19) to the container image itself: our own CI-built Neolink
+binary connected, logged in, and registered its RTSP mount identically on our
+generic `ghcr.io/home-assistant/*-base-debian:bookworm` image, but its GStreamer
+pipeline-construction callback silently never succeeded (permanent 404, zero
+error output even at RUST_LOG=trace). Proven via a live side-by-side test: the
+exact same pinned commit, run through the upstream `Neolink-latest` HA add-on
+(a thin wrapper around `quantumentangledandy/neolink:latest`), streamed to
+Frigate immediately on the same camera. Fixed by rebasing this add-on's
+Dockerfile/build.yaml onto that same upstream image instead of hand-picking
+GStreamer apt packages on a generic Debian base — we still overwrite the binary
+with our own CI-pinned build on top of it for reproducibility. Lesson: when a
+Rust+GStreamer binary works in one container and not another with identical
+logs up to the point of silent failure, suspect the *runtime's plugin set*
+before the application code — a mount can register successfully (needs
+nothing) while the actual pipeline-build callback silently fails for a
+plugin/version mismatch invisible to the app's own logging.
+
+*Previously: v0.1.19 — the persistent RTSP DESCRIBE 404 that blocked the stream
 for several versions is understood and fixed. Root cause, confirmed against
 Neolink's pinned-commit source: Neolink's RTSP mounts intentionally 404 on
 DESCRIBE until an internal per-camera learning phase (buffering frames until it

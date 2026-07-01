@@ -4,13 +4,8 @@
 # -----------------
 # Three concerns in one image:
 #   1. Neolink (Rust + GStreamer) — speaks Reolink's Baichuan protocol on port 9000
-#      and serves RTSP LOCALHOST-ONLY on an internal port. We DOWNLOAD a prebuilt
-#      binary (Neolink 0.6.3-rc.3, built from source by this repo's CI — see
-#      .github/workflows/build-neolink.yml) so the Home Assistant device never has
-#      to compile Rust. We use rc.3, not the newest *release* (rc.2): rc.2 connects
-#      and lists streams but then stutters and hangs on recent Reolink firmware,
-#      while rc.3 (what the proven "Neolink-latest" add-on ran) holds the stream.
-#      We keep Neolink for the video path and never reinvent it.
+#      and serves RTSP LOCALHOST-ONLY on an internal port. We keep Neolink for the
+#      video path and never reinvent it.
 #   2. go2rtc — restreams Neolink's internal feed to the public port this add-on has
 #      always exposed. Neolink's RTSP server was found to be unable to safely serve
 #      more than one simultaneous client at all; go2rtc is purpose-built for exactly
@@ -19,10 +14,24 @@
 #   3. A Python control plane (reolink-aio + FastAPI): PTZ / IR / spotlight / siren,
 #      a self-healing health watchdog, and the web GUI.
 #
-# To compile Neolink from source on-device instead of downloading, see the
-# multi-stage Dockerfile in this repo's git history at tag/commit for v0.1.7.
-
-ARG BUILD_FROM
+# Base image: quantumentangledandy/neolink:latest, NOT the generic HA Debian base.
+# v0.1.20 diagnosis: our own Neolink binary (built by this repo's CI from the exact
+# same pinned commit, 6e05e7844b5b) connected to the camera, logged in, and
+# registered its RTSP mount identically — but every DESCRIBE against it returned a
+# permanent 404 with zero further Neolink log output even at RUST_LOG=trace,
+# meaning its GStreamer pipeline-construction callback was silently never
+# succeeding. A controlled side-by-side test proved the SAME commit, SAME camera,
+# run via the upstream `Neolink-latest` HA add-on (which is a thin wrapper around
+# this exact upstream image) streamed to Frigate immediately. The only variable
+# that changed was the container: that add-on doesn't hand-pick GStreamer apt
+# packages on a generic Debian base like this Dockerfile used to — it runs inside
+# the image the Neolink maintainers themselves build and test the binary against.
+# Building FROM that image instead removes the guesswork of matching its exact
+# GStreamer plugin set/versions by hand. We still overwrite the binary below with
+# our own CI-pinned build for reproducibility (this image's own commit happened to
+# match ours, but pinning explicitly means a future upstream :latest move can't
+# silently change what we ship).
+ARG BUILD_FROM=quantumentangledandy/neolink:latest
 FROM ${BUILD_FROM}
 
 ENV LANG=C.UTF-8 \
@@ -30,23 +39,12 @@ ENV LANG=C.UTF-8 \
     PIP_BREAK_SYSTEM_PACKAGES=1
 
 # --- Runtime dependencies -----------------------------------------------------------
-# GStreamer is the media pipeline Neolink links against. plugins-bad provides the RTSP
-# server (gstrtsp); plugins-ugly/libav provide H.264/H.265 parsing + decode.
-#
-# Deliberately no gstreamer1.0-tools / gst-launch and no ffmpeg: the GUI does not run
-# a live preview (see api.py), so nothing in this image opens a second RTSP
-# connection to Neolink. Only the runtime libraries Neolink itself links against are
-# installed — nothing that could contend with its own pipeline.
+# GStreamer itself comes from the base image (see above) — we only need to add the
+# packages this add-on's OWN code needs on top of it: Python for the control plane,
+# curl to fetch the Neolink/go2rtc binaries below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
         python3 python3-pip \
-        gstreamer1.0-plugins-base \
-        gstreamer1.0-plugins-good \
-        gstreamer1.0-plugins-bad \
-        gstreamer1.0-plugins-ugly \
-        gstreamer1.0-libav \
-        gstreamer1.0-rtsp \
-        libgstrtspserver-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Neolink binary (prebuilt by CI, downloaded here) -------------------------------

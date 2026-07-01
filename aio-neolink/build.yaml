@@ -1,5 +1,11 @@
+# quantumentangledandy/neolink:latest, not the generic HA Debian base — see the
+# Dockerfile's top comment (v0.1.20/21) for why: it's the exact GStreamer runtime
+# the Neolink binary is built and tested against, proven live against this
+# project's own camera, whereas hand-picking GStreamer apt packages on the generic
+# HA base silently left Neolink's pipeline-construction callback unable to build a
+# working RTSP media pipeline (permanent DESCRIBE 404, zero error output).
 build_from:
-  aarch64: ghcr.io/home-assistant/aarch64-base-debian:bookworm
-  amd64: ghcr.io/home-assistant/amd64-base-debian:bookworm
+  aarch64: quantumentangledandy/neolink:latest
+  amd64: quantumentangledandy/neolink:latest
 labels:
   org.opencontainers.image.source: https://github.com/btoth525/aio-neolink
