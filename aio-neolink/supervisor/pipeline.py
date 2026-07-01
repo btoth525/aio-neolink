@@ -94,8 +94,21 @@ class SupervisorOptions:
     # URL Frigate uses. Neolink itself is internal-only (see config_gen.py) and must
     # only ever have go2rtc as a client; connecting straight to it here would defeat
     # the entire point of the restream layer.
+    #
+    # TEMPORARY ONE-DEPLOY DIAGNOSTIC: pointed at Neolink's internal port (18554)
+    # instead of go2rtc's public port (8554). go2rtc's DESCRIBE against Neolink
+    # fails with a clean 404 even minutes into a stable run; go2rtc's own source
+    # confirms it never sends OPTIONS before DESCRIBE (Dial() -> Describe(),
+    # no Options() call). This add-on's own probe always sends OPTIONS first and
+    # has years^Wweeks of proven success against Neolink directly (pre-go2rtc) —
+    # pointing it at 18554 for one deploy tells us whether Neolink requires an
+    # OPTIONS preamble (go2rtc-specific bug, needs an exec: source workaround) or
+    # whether something about the 127.0.0.1:18554 bind itself is broken regardless
+    # of client behavior (a deeper problem). REVERT to rtsp_port=8554 (go2rtc)
+    # after this is answered — do not leave the watchdog pointed at Neolink
+    # directly; see CLAUDE.md §7 for why that's failed three times before.
     rtsp_host: str = "127.0.0.1"
-    rtsp_port: int = 8554
+    rtsp_port: int = 18554
     restart_backoff: float = 5.0     # min seconds between full process restarts
     startup_grace: float = 45.0      # seconds after (re)start before silence counts
 
