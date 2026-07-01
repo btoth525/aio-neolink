@@ -64,21 +64,22 @@ self-healing system — plus the features and GUI to make it worth replacing Neo
 
 ## 4. Architecture (the decision, and why)
 
-Two mature projects each own one half; aio-neolink fuses them and adds the supervisor.
+Three mature projects each own one part; aio-neolink fuses them and adds the supervisor.
 
 | Layer | Project | Role |
 |-------|---------|------|
-| **Video** | **Neolink** (Rust + GStreamer) | Pull H.264/H.265 Baichuan video, serve RTSP on `:8554`. Keep this — it's the hard, reverse-engineered part; don't reinvent it. |
+| **Video** | **Neolink** (Rust + GStreamer) | Pull H.264/H.265 Baichuan video, serve RTSP on a **localhost-only internal port** (`18554`). Keep this — it's the hard, reverse-engineered part; don't reinvent it. |
+| **Restream** | **go2rtc** (Go, AlexxIT — same restream server Frigate bundles) | The ONLY client Neolink ever has. Pulls Neolink's one stream, republishes on the **public `:8554`** Frigate/VLC/etc. use — Neolink's RTSP server can't safely serve more than one simultaneous client (learned the hard way, §7), go2rtc can. |
 | **Control** | **reolink-aio** (Python, *officially authorized by Reolink*, dev @starkillerOG; same lib HA's Reolink integration uses) | Probe model/capabilities, PTZ, spotlight, siren, IR, motion/AI events. |
-| **Supervisor + GUI** | **aio-neolink** (this repo, Python + FastAPI) | Health-watchdog the video pipeline and auto-recover hangs; generate `neolink.toml`; serve REST + web GUI via HA Ingress. |
+| **Supervisor + GUI** | **aio-neolink** (this repo, Python + FastAPI) | Health-watchdog the stream (via go2rtc, not Neolink directly) and auto-recover hangs; generate `neolink.toml` + `go2rtc.yaml`; serve REST + web GUI via HA Ingress. |
 
 Data flow:
 
 ```
-Reolink cam ──Baichuan :9000──► Neolink ──RTSP :8554/<name>──► Frigate
-     ▲                                          ▲
-     │ control (PTZ/lights/siren)               │ health probes + auto-restart
-     └──────── reolink-aio ◄── FastAPI GUI ──── supervisor (watchdog)
+Reolink cam ──Baichuan :9000──► Neolink ──RTSP :18554──► go2rtc ──RTSP :8554/<name>──► Frigate
+     ▲                                                       ▲
+     │ control (PTZ/lights/siren)                            │ health watch + auto-restart
+     └──────── reolink-aio ◄── FastAPI GUI ──────────── supervisor (watchdog)
 ```
 
 Stack choice: **Python + FastAPI** (recommended and accepted) because reolink-aio is
@@ -97,14 +98,17 @@ aio-neolink/
 └── aio-neolink/                 ← the add-on
     ├── config.yaml              ← manifest: ports (8554 RTSP, 8099 ingress GUI), options schema, host_network
     ├── build.yaml               ← per-arch base images (aarch64/amd64 debian bookworm)
-    ├── Dockerfile               ← GStreamer runtime + Neolink binary + Python control plane
+    ├── Dockerfile               ← GStreamer runtime + Neolink binary + go2rtc + Python control plane
     ├── run.sh                   ← entrypoint → launches supervisor.main
     ├── rootfs/
-    │   └── fetch-neolink.sh     ← downloads the CI-built Neolink rc.3 binary for BUILD_ARCH
+    │   ├── fetch-neolink.sh     ← downloads the CI-built Neolink rc.3 binary for BUILD_ARCH
+    │   └── fetch-go2rtc.sh      ← downloads the go2rtc restream binary for BUILD_ARCH
     ├── supervisor/
-    │   ├── main.py              ← wires store + pipeline + controls + watchdog + API; owns the event loop
-    │   ├── pipeline.py          ← ★ the self-heal: runs Neolink, probes RTSP health, restarts on hang
-    │   ├── config_gen.py        ← renders neolink.toml from the camera store
+    │   ├── main.py              ← wires store + pipeline + restream + controls + watchdog + API
+    │   ├── pipeline.py          ← ★ the self-heal: runs Neolink, watches go2rtc, restarts on hang
+    │   ├── config_gen.py        ← renders neolink.toml (Neolink: localhost-only, internal port)
+    │   ├── restream.py          ← ★ owns the go2rtc subprocess (Neolink's only client)
+    │   ├── restream_gen.py      ← renders go2rtc.yaml (public RTSP restream, from camera store)
     │   ├── control.py           ← reolink-aio wrapper: probe / IR / spotlight / siren / PTZ
     │   ├── store.py             ← camera persistence (JSON in /data, chmod 600)
     │   ├── api.py               ← FastAPI: camera CRUD, probe, health, control; serves GUI
@@ -209,29 +213,38 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
   `control.py` currently requires a wired address — battery control is a TODO.
 - **Watchdog restart backoff** (`restart_backoff`, default 5s) prevents restart loops —
   don't remove it.
-- **Nothing may repeatedly open/close RTSP connections against Neolink.** This has
-  caused two separate real regressions, both traced to the same root cause: Neolink
-  runs a *shared* per-camera GStreamer pipeline, and repeated attach/detach cycles
-  from any client race with other concurrently-connected clients (Frigate) inside
-  that shared pipeline, corrupting internal GStreamer state.
-  1. v0.1.3–0.1.8 had a live MJPEG preview in the web GUI (ffmpeg, then
-     `gst-launch`) that opened a fresh RTSP connection whenever the GUI rendered —
-     removed entirely in v0.1.9 (`GStreamer-RTSP-Server-CRITICAL: could not create
-     element`, dropped frames).
+- **Neolink must only ever have ONE RTSP client: go2rtc.** This was learned the hard
+  way across three escalating attempts, all traced to the same underlying fact:
+  Neolink's RTSP server (this build) cannot safely serve more than one simultaneous
+  client on the same camera, period — not a churn/reconnect issue, a hard
+  concurrency limit.
+  1. v0.1.3–0.1.8 had a live MJPEG preview in the web GUI that opened a second RTSP
+     connection whenever the GUI rendered — crashed Neolink
+     (`GStreamer-RTSP-Server-CRITICAL: could not create element`). Removed in v0.1.9.
   2. The watchdog's own health probe originally reconnected every `health_interval`
-     (SETUP → PLAY → TEARDOWN, repeated). Harmless alone, but once Frigate was
-     *also* connected continuously, the probe's periodic churn crashed Neolink
-     outright (`gst_poll_write_control: assertion 'set != NULL' failed`, flooding
-     until the process died with SIGTRAP). Fixed by rearchitecting the watchdog
-     (`pipeline.py`, `_CameraMonitor`) to hold **one persistent connection per
-     camera** for the life of a healthy stream, and just watch it for silence —
-     Neolink never sees more churn than a single steady client, matching what a
-     lone VLC connection already proved was safe.
+     — also crashed Neolink once Frigate was *also* connected
+     (`gst_poll_write_control: assertion 'set != NULL' failed`, then SIGTRAP).
+     Rewritten in v0.1.10 to hold one persistent connection instead of reconnecting.
+  3. **The v0.1.10 fix was insufficient** — confirmed by direct testing, the exact
+     same crash still happened with a single persistent watchdog connection plus
+     Frigate. This proved the bug was never about reconnect churn: Neolink can't
+     tolerate 2 *simultaneous* clients on one camera, full stop.
+  4. **v0.1.11 fixed it architecturally.** go2rtc (the same restream server Frigate
+     bundles for other camera types) now sits between Neolink and everyone else.
+     `config_gen.py` binds Neolink to `127.0.0.1:18554` (localhost-only, internal —
+     see the port comment there for why 18554 specifically, to avoid go2rtc's own
+     default ports). `restream_gen.py`/`restream.py` run go2rtc as a second
+     subprocess that pulls Neolink's one stream and republishes it on the public
+     `:8554` Frigate has always used. The watchdog (`pipeline.py`,
+     `_CameraMonitor`) now watches go2rtc's public endpoint, not Neolink directly —
+     Neolink has exactly one client (go2rtc) for its entire lifetime, and go2rtc is
+     purpose-built to safely fan that one feed out to any number of downstream
+     consumers (Frigate, VLC, the watchdog itself).
 
-  **Do not reintroduce periodic reconnect/probe cycles or a GUI-side RTSP client**
-  without first proving — with real logs, cameras connected via both this add-on
-  AND Frigate simultaneously — that it can't destabilize the shared stream. Holding
-  that stream is the entire point of this project.
+  **Do not connect anything directly to Neolink's internal RTSP port again** —
+  not the GUI, not the watchdog, nothing — without first proving, with real logs
+  and Frigate connected simultaneously, that Neolink can tolerate it. It has failed
+  this test three times. Route everything through go2rtc instead.
 - **Licensing:** Neolink is GPL-3.0. Keep this repo GPL-3.0-compatible.
 - **Placeholders:** all replaced with the real owner (`btoth525`) across `config.yaml`,
   `repository.yaml`, `build.yaml`, and `README.md`. Nothing left to fill in.
@@ -248,28 +261,36 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
   restarting. Restarting Neolink drops every connected client (Frigate included)
   and forces a cold camera re-negotiation, so an eager watchdog actively prevents a
   merely-flaky feed from ever stabilising.
-- Don't add anything to the image — GUI feature or watchdog logic — that opens more
-  than one RTSP connection per camera, or that reconnects on a cycle instead of
-  holding a session open (see §7) — this has already caused two real regressions,
-  including a full Neolink crash once a second client was present.
+- Don't connect anything (GUI feature, watchdog, ad-hoc debugging) directly to
+  Neolink's internal RTSP port (`127.0.0.1:18554`) — only go2rtc may. Route new
+  consumers through go2rtc's public port instead (see §7) — connecting straight to
+  Neolink has failed three separate times, including a full process crash.
 - Don't store secrets anywhere outside `/data`.
 
 ---
 
 ## 9. Quick reference
 
-- RTSP for Frigate: `rtsp://<addon-host>:8554/<camera_name>` (unchanged from stock).
+- RTSP for Frigate: `rtsp://<addon-host>:8554/<camera_name>` (unchanged from stock;
+  this is go2rtc now, not Neolink directly).
+- Neolink's internal-only RTSP: `127.0.0.1:18554` — go2rtc's only client, nothing
+  else may connect here (§7).
 - Add-on options: `log_level`, `watchdog_timeout` (s, 0=off), `health_interval` (s).
-- Key source-of-truth files for behavior: `pipeline.py` (recovery), `config_gen.py`
-  (Neolink contract), `control.py` (reolink-aio contract).
+- Key source-of-truth files for behavior: `pipeline.py` (recovery, watches go2rtc),
+  `config_gen.py` (Neolink contract), `restream_gen.py`/`restream.py` (go2rtc
+  contract + process), `control.py` (reolink-aio contract).
 - Original protocol background: George Hilliard, "Hacking Reolink cameras for fun and
   profit" (the post that created Neolink) — explains Baichuan, port 9000, the GStreamer
   `appsrc` video loop that §6.5.1 wants to instrument.
 
 ---
 
-*Last updated: v0.1.9 — Neolink rc.3 is now built by this repo's own CI and
-downloaded at image-build time (no on-device compile); watchdog is sustained-failure
-only (120s / 30s interval defaults); the live preview was removed after it was found
-to destabilize Neolink's own RTSP pipeline. Confirmed working: VLC holds the stream
-served by rc.3. Keep this current — it's the contract between sessions.*
+*Last updated: v0.1.11 — go2rtc now sits between Neolink and the world (Neolink is
+localhost-only, internal port 18554; go2rtc republishes on the public :8554
+Frigate has always used) because Neolink was proven, by direct testing, unable to
+safely serve more than one simultaneous RTSP client on the same camera — not a
+churn issue, confirmed even after the watchdog was rewritten to hold a single
+persistent connection. The watchdog now watches go2rtc's public endpoint instead of
+Neolink directly. Neolink rc.3 is still built by this repo's own CI and downloaded
+at image-build time (no on-device compile). Keep this current — it's the contract
+between sessions.*

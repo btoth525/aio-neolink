@@ -16,16 +16,27 @@ left from here is hardening and features, not blockers.
   firmware; rc.3 (an in-development version one step ahead of any release) is what
   the original working add-on ran, and is what this one ships now. No Rust compiles
   on the Home Assistant device.
+- **go2rtc restream layer — the fix that actually solved the crash** — Neolink's
+  RTSP server (this build) was proven, by direct testing, unable to safely serve
+  more than one simultaneous client on the same camera at all. Two earlier
+  mitigations (removing the GUI preview, then rewriting the watchdog to hold one
+  persistent connection instead of reconnecting) both reduced but didn't eliminate
+  the crash, because neither addressed the real constraint: Neolink + Frigate
+  connected together, at all, was enough. `restream_gen.py`/`restream.py` now run
+  go2rtc (the same restream server Frigate bundles for other camera types) as a
+  second subprocess: Neolink binds `127.0.0.1:18554` (localhost-only, internal —
+  `config_gen.py`), go2rtc is its one and only client, and go2rtc republishes on
+  the public `:8554` Frigate has always used. Neolink now never has more than one
+  client for its entire lifetime, and go2rtc — purpose-built for exactly this
+  fan-out — safely serves Frigate, VLC, and the watchdog itself simultaneously.
 - **Self-healing watchdog, one persistent connection per camera** — `pipeline.py`
-  opens a single RTSP session (`OPTIONS → DESCRIBE → SETUP → PLAY`) per camera and
-  holds it open, timestamping every byte that arrives. Every `health_interval`
-  seconds the supervisor just checks how long that connection has been silent — it
-  never reconnects on a cycle. This catches the exact "port open, OPTIONS returns
-  200, but no frames" hang that caused the original 29-hour outage, without adding
-  any connection churn of its own. (An earlier version reconnected every cycle and
-  was found to crash Neolink once a second real client, Frigate, was also
-  connected — the repeated attach/detach raced with Frigate's live session inside
-  Neolink's shared pipeline. Fixed by holding one steady connection instead.)
+  opens a single RTSP session (`OPTIONS → DESCRIBE → SETUP → PLAY`) against
+  go2rtc's public endpoint per camera and holds it open, timestamping every byte
+  that arrives. Every `health_interval` seconds the supervisor just checks how long
+  that connection has been silent. This catches the exact "port open, but no
+  frames" hang that caused the original 29-hour outage — and because it watches
+  go2rtc rather than Neolink directly, the watchdog itself can never be the thing
+  that destabilizes Neolink, regardless of how many other clients are connected.
 - **Tolerant restart policy** — the watchdog only restarts Neolink after
   `watchdog_timeout` seconds of *sustained* silence on that connection, not on the
   first blip. An eager watchdog was found, in practice, to actively prevent a
@@ -81,11 +92,18 @@ Neolink exposes no per-camera control. In order of payoff:
 
 - **M1 — ✅ done.** Real Neolink binary streams and holds (confirmed via VLC);
   watchdog recovers a forced hang (`kill -STOP`); web GUI works end-to-end.
+- **M1.5 — ✅ done.** Neolink survives being connected to alongside Frigate without
+  crashing — required putting go2rtc in front of it, since Neolink itself can't
+  tolerate more than one simultaneous client. This wasn't originally a planned
+  milestone; it became one after real-world testing surfaced the crash.
 - **M2 — in progress.** reolink-aio capability flags verified across more camera
   models than just the E1; battery camera control.
 - **M3 — planned.** Fork Neolink, add the in-process frame watchdog + per-camera
   control surface. Recovery becomes sub-second and per-camera instead of
-  minutes-and-whole-process.
+  minutes-and-whole-process. (Partially softened already: go2rtc absorbs a Neolink
+  restart on its own, so downstream clients like Frigate don't necessarily drop
+  when Neolink cycles — the remaining gap is Neolink itself still restarting as a
+  single whole-process unit rather than per-camera.)
 - **M4 — planned.** Two-way audio: reolink-aio + Neolink's audio backchannel,
   surfaced as a talk button in the GUI.
 

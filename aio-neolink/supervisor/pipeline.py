@@ -11,19 +11,30 @@ A TCP-connect or RTSP OPTIONS check reports "healthy" even during the original h
 stops sending RTP. So health has to be judged by whether RTP bytes are actually
 flowing, not by whether the port answers.
 
-Why the health check holds ONE persistent connection instead of reconnecting
--------------------------------------------------------------------------------
-An earlier version of this watchdog opened a brand-new RTSP session (SETUP → PLAY →
-TEARDOWN) every `health_interval` seconds. That worked fine with a single steady
-client (e.g. VLC) but crashed Neolink once a second real client (Frigate) was also
-connected continuously: the health check's repeated attach/detach cycles raced with
-Frigate's live session inside Neolink's shared per-camera GStreamer pipeline,
-surfacing as a flood of `gst_poll_write_control: assertion 'set != NULL' failed`
-followed by the process dying (SIGTRAP). The fix is to stop generating that churn:
-each camera gets exactly ONE long-lived RTSP session for as long as the stream is
-healthy — connected once, then just watched for silence — so the watchdog's own
-footprint on Neolink never grows past "one more steady client," matching what a
-single VLC connection already proved works.
+Why the watchdog doesn't connect to Neolink directly at all
+-------------------------------------------------------------
+Two escalating fixes were tried and both proved insufficient before the real cause
+was found. First, the watchdog reconnected to each camera's stream every
+`health_interval` seconds (SETUP → PLAY → TEARDOWN, repeated) — that worked with a
+single steady client (VLC) but crashed Neolink once a second real client (Frigate)
+was also connected continuously, surfacing as a flood of
+`gst_poll_write_control: assertion 'set != NULL' failed` followed by the process
+dying. Second, the watchdog was rewritten to hold ONE persistent connection instead
+of reconnecting on a cycle — but the exact same crash still happened. That proved
+the bug isn't about reconnect churn: Neolink's RTSP server (this build) appears
+unable to safely serve more than one simultaneous client on the same camera at all,
+churn or not.
+
+The real fix is architectural, in restream.py / restream_gen.py: go2rtc (the same
+restream server Frigate already bundles) sits between Neolink and everyone else.
+Neolink is moved to a localhost-only, internal port and go2rtc is its ONLY client,
+ever — a role go2rtc is purpose-built for and Neolink has now proven it can sustain.
+go2rtc republishes each camera on the same public port/URL this add-on has always
+used, so Frigate needs zero reconfiguration. This module's watchdog then watches
+go2rtc's public endpoint instead of Neolink directly, which both keeps the
+persistent-connection design (still the right way to detect a silent hang) and
+means the watchdog itself is just one more of go2rtc's fan-out clients — exactly
+the scenario go2rtc is designed to handle safely, unlike Neolink's own RTSP server.
 
 Recovery
 --------
@@ -33,6 +44,8 @@ Recovery
 2. Neolink exiting on its own (crash, not a hang) → restart immediately, without
    waiting for the silence timer — a dead process is not a maybe.
 3. `restart_backoff` prevents restart storms when a camera is genuinely offline.
+4. go2rtc restarts independently of Neolink (see restream.py) — a Neolink restart
+   doesn't need to also drop every downstream client's connection to go2rtc.
 """
 from __future__ import annotations
 
@@ -77,6 +90,10 @@ class CameraHealth:
 class SupervisorOptions:
     watchdog_timeout: int = 120      # seconds of *sustained* silence before a restart
     health_interval: int = 30        # seconds between watchdog silence checks
+    # The watchdog watches go2rtc's PUBLIC endpoint, not Neolink directly — the same
+    # URL Frigate uses. Neolink itself is internal-only (see config_gen.py) and must
+    # only ever have go2rtc as a client; connecting straight to it here would defeat
+    # the entire point of the restream layer.
     rtsp_host: str = "127.0.0.1"
     rtsp_port: int = 8554
     restart_backoff: float = 5.0     # min seconds between full process restarts
@@ -291,7 +308,15 @@ class PipelineManager:
     # --- process lifecycle --------------------------------------------------------
 
     async def apply(self, cameras: list[Camera]) -> None:
-        """Regenerate config and (re)start Neolink."""
+        """Regenerate config, (re)start Neolink, and (re)build health monitors.
+
+        Monitors are managed here — tied to the camera list changing — rather than
+        inside _start_locked/_stop_locked. They watch go2rtc's public endpoint, not
+        Neolink directly, and go2rtc is deliberately NOT restarted when Neolink is
+        (see restream.py): a Neolink crash-restart shouldn't also tear down and
+        rebuild the monitor's connection, since go2rtc absorbs that hiccup on its
+        own. Monitors only need to change when the actual camera list does.
+        """
         async with self._lock:
             self._cameras = cameras
             self._health = {
@@ -299,7 +324,9 @@ class PipelineManager:
                 for c in cameras if c.enabled
             }
             config_gen.write(cameras)
+            await self._stop_monitors()
             await self._restart_locked(reason="config applied")
+            self._start_monitors()
 
     async def _start_locked(self) -> None:
         if not any(c.enabled for c in self._cameras):
@@ -312,19 +339,16 @@ class PipelineManager:
             stderr=asyncio.subprocess.STDOUT,
         )
         asyncio.create_task(self._drain_logs(self._proc))
-        self._start_monitors()
 
     def _start_monitors(self) -> None:
         for cam in self._cameras:
             if not cam.enabled:
                 continue
-            # Probe the sub-stream by preference: lower bitrate, more frequent
-            # keyframes, so it establishes faster and is less prone to a slow first
-            # keyframe looking like a hang. A camera pinned to mainStream has no
-            # sub mount, so watch main there.
-            stream_name = f"{cam.name}/mainStream" if cam.stream == "mainStream" else f"{cam.name}/subStream"
+            # Watch go2rtc's published name for this camera — the exact URL
+            # Frigate uses — not Neolink directly. Neolink must only ever have
+            # go2rtc as a client (see restream_gen.py for why).
             health = self._health.setdefault(cam.name, CameraHealth(camera_name=cam.name))
-            monitor = _CameraMonitor(self.opts.rtsp_host, self.opts.rtsp_port, stream_name, health)
+            monitor = _CameraMonitor(self.opts.rtsp_host, self.opts.rtsp_port, cam.name, health)
             monitor.start()
             self._monitors[cam.name] = monitor
 
@@ -344,7 +368,6 @@ class PipelineManager:
         log.info("neolink (re)started: %s", reason)
 
     async def _stop_locked(self) -> None:
-        await self._stop_monitors()
         if self._proc and self._proc.returncode is None:
             log.info("stopping neolink (SIGTERM)")
             self._intentionally_stopping.add(id(self._proc))
@@ -465,5 +488,6 @@ class PipelineManager:
 
     async def shutdown(self) -> None:
         self._stop.set()
+        await self._stop_monitors()
         async with self._lock:
             await self._stop_locked()

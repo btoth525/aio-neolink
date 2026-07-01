@@ -20,7 +20,7 @@ from pathlib import Path
 
 import uvicorn
 
-from . import api, control, pipeline, store
+from . import api, control, pipeline, restream, store
 
 OPTIONS_FILE = Path("/data/options.json")
 INGRESS_PORT = int(os.environ.get("INGRESS_PORT", "8099"))
@@ -66,13 +66,18 @@ async def main() -> None:
         health_interval=int(opts.get("health_interval", 30)),
     )
     pipe = pipeline.PipelineManager(sup_opts)
+    restreamer = restream.RestreamManager()
     controls = control.ControlRegistry()
 
     cameras = cam_store.list()
     log.info("loaded %d camera(s) from store", len(cameras))
+    # Neolink produces the video; go2rtc pulls it and is the only thing that ever
+    # connects to Neolink directly (see restream_gen.py). Start Neolink first, then
+    # go2rtc — though go2rtc retries its own upstream connection regardless of order.
     await pipe.apply(cameras)
+    await restreamer.apply(cameras)
 
-    app = api.create_app(cam_store, pipe, controls)
+    app = api.create_app(cam_store, pipe, restreamer, controls)
     uvi_cfg = uvicorn.Config(
         app,
         host="0.0.0.0",
@@ -105,6 +110,7 @@ async def main() -> None:
     finally:
         log.info("shutting down pipeline and control connections")
         await pipe.shutdown()
+        await restreamer.shutdown()
         await controls.close_all()
         log.info("aio-neolink stopped cleanly")
 

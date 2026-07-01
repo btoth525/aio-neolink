@@ -62,14 +62,19 @@ class ControlIn(BaseModel):
     speed: int = 32
 
 
-def create_app(store: CameraStore, pipeline, controls) -> FastAPI:
-    app = FastAPI(title="aio-neolink", version="0.1.10")
+def create_app(store: CameraStore, pipeline, restreamer, controls) -> FastAPI:
+    app = FastAPI(title="aio-neolink", version="0.1.11")
     app.state.store = store
     app.state.pipeline = pipeline
+    app.state.restreamer = restreamer
     app.state.controls = controls
 
     async def _reapply() -> None:
-        await pipeline.apply(store.list())
+        cameras = store.list()
+        # Neolink's config first, then go2rtc's — go2rtc's sources reference the
+        # camera names/streams Neolink is about to serve.
+        await pipeline.apply(cameras)
+        await restreamer.apply(cameras)
 
     @app.get("/api/cameras")
     async def list_cameras():

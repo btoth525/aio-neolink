@@ -6,6 +6,10 @@ camera. We render it from the store so the GUI never makes the user touch TOML b
 TOML schema targets the QuantumEntangledAndy fork (0.6.x) which is what the original
 "Neolink-latest" add-on ships. Verify against your exact binary if upgrading:
   neolink rtsp --config /dev/null --help
+
+Neolink binds LOCALHOST ONLY, on an internal-only port — see restream_gen.py for why:
+go2rtc is the sole client that ever connects to it, and go2rtc republishes to the
+outside world (Frigate, VLC, etc.) on the public port this add-on has always used.
 """
 from __future__ import annotations
 
@@ -17,8 +21,11 @@ from .store import Camera
 log = logging.getLogger("aio-neolink.config_gen")
 
 NEOLINK_CONFIG = Path(os.environ.get("NEOLINK_CONFIG", "/data/neolink.toml"))
-RTSP_BIND_ADDR = os.environ.get("RTSP_BIND_ADDR", "0.0.0.0")
-RTSP_PORT = int(os.environ.get("RTSP_PORT", "8554"))
+# Internal-only: go2rtc is the only thing that ever connects here. Deliberately far
+# from go2rtc's own default ports (1984 API, 8554 RTSP, 8555 WebRTC) to avoid any
+# collision with them.
+RTSP_BIND_ADDR = os.environ.get("NEOLINK_RTSP_BIND_ADDR", "127.0.0.1")
+RTSP_PORT = int(os.environ.get("NEOLINK_RTSP_PORT", "18554"))
 
 
 def _render_camera(cam: Camera) -> str:

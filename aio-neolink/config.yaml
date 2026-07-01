@@ -1,5 +1,5 @@
 name: aio-neolink
-version: "0.1.10"
+version: "0.1.11"
 slug: aio_neolink
 description: "Reliable Reolink Baichuan-to-RTSP bridge with self-healing watchdog, PTZ/lights/siren control, and a web GUI"
 url: https://github.com/btoth525/aio-neolink
@@ -22,7 +22,7 @@ panel_title: aio-neolink
 ports:
   8554/tcp: 8554
 ports_description:
-  8554/tcp: "RTSP output for Frigate / go2rtc / Blue Iris"
+  8554/tcp: "RTSP output for Frigate / VLC / Blue Iris (served by go2rtc, bundled inside this add-on)"
 
 options:
   log_level: info
