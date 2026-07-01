@@ -66,16 +66,22 @@ async def main() -> None:
         health_interval=int(opts.get("health_interval", 30)),
     )
     pipe = pipeline.PipelineManager(sup_opts)
-    restreamer = restream.RestreamManager()
+    # v0.1.25: go2rtc restream layer DISABLED by default. Neolink now serves
+    # Frigate directly on the public :8554, exactly replicating the proven-working
+    # `Neolink-latest` add-on (same baked-in binary, same port, no middle layer).
+    # The restream code is kept and can be re-enabled with AIO_ENABLE_RESTREAM=1
+    # (plus NEOLINK_RTSP_PORT=18554 so the two don't fight over 8554) if the
+    # multi-client concern ever proves real with this binary.
+    enable_restream = os.environ.get("AIO_ENABLE_RESTREAM", "") == "1"
+    restreamer = restream.RestreamManager() if enable_restream else None
     controls = control.ControlRegistry()
 
     cameras = cam_store.list()
     log.info("loaded %d camera(s) from store", len(cameras))
-    # Neolink produces the video; go2rtc pulls it and is the only thing that ever
-    # connects to Neolink directly (see restream_gen.py). Start Neolink first, then
-    # go2rtc — though go2rtc retries its own upstream connection regardless of order.
+    log.info("restream layer (go2rtc): %s", "enabled" if enable_restream else "disabled — Neolink serves :8554 directly")
     await pipe.apply(cameras)
-    await restreamer.apply(cameras)
+    if restreamer:
+        await restreamer.apply(cameras)
 
     app = api.create_app(cam_store, pipe, restreamer, controls)
     uvi_cfg = uvicorn.Config(
@@ -110,7 +116,8 @@ async def main() -> None:
     finally:
         log.info("shutting down pipeline and control connections")
         await pipe.shutdown()
-        await restreamer.shutdown()
+        if restreamer:
+            await restreamer.shutdown()
         await controls.close_all()
         log.info("aio-neolink stopped cleanly")
 

@@ -440,9 +440,12 @@ class PipelineManager:
         assert proc.stdout is not None
         async for raw in proc.stdout:
             line = raw.decode(errors="replace").rstrip()
-            # Neolink polls Reolink's cloud push-notification server; this fails in
-            # local-only setups and would otherwise spam the log every 4 seconds.
-            if "pushnoti" in line and "Issue connecting" in line:
+            # Neolink polls Reolink's cloud push-notification server; in local-only
+            # setups this retries forever and would otherwise spam the log every few
+            # seconds (both its "Issue connecting" failures and, at debug/trace, its
+            # "Registering new push notification token" retry loop). Drop the whole
+            # module's chatter — it's unrelated to streaming.
+            if "pushnoti" in line:
                 continue
             log.info("[neolink] %s", line)
         rc = await proc.wait()

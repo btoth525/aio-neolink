@@ -63,7 +63,7 @@ class ControlIn(BaseModel):
 
 
 def create_app(store: CameraStore, pipeline, restreamer, controls) -> FastAPI:
-    app = FastAPI(title="aio-neolink", version="0.1.24")
+    app = FastAPI(title="aio-neolink", version="0.1.25")
     app.state.store = store
     app.state.pipeline = pipeline
     app.state.restreamer = restreamer
@@ -71,10 +71,12 @@ def create_app(store: CameraStore, pipeline, restreamer, controls) -> FastAPI:
 
     async def _reapply() -> None:
         cameras = store.list()
-        # Neolink's config first, then go2rtc's — go2rtc's sources reference the
-        # camera names/streams Neolink is about to serve.
+        # Neolink's config first, then go2rtc's (if the optional restream layer is
+        # enabled — see main.py; it's off by default since v0.1.25, with Neolink
+        # serving :8554 directly).
         await pipeline.apply(cameras)
-        await restreamer.apply(cameras)
+        if restreamer:
+            await restreamer.apply(cameras)
 
     @app.get("/api/cameras")
     async def list_cameras():

@@ -40,10 +40,15 @@ from .store import Camera
 log = logging.getLogger("aio-neolink.config_gen")
 
 NEOLINK_CONFIG = Path(os.environ.get("NEOLINK_CONFIG", "/data/neolink.toml"))
-# go2rtc is meant to be the only real client. Port deliberately far from go2rtc's
-# own default ports (1984 API, 8554 RTSP, 8555 WebRTC) to avoid any collision.
+# v0.1.25: Neolink now serves Frigate DIRECTLY on the public port 8554 — the exact
+# setup of the proven-working `Neolink-latest` add-on (same binary, same port, no
+# restream layer in between). The go2rtc restream layer is disabled (see main.py);
+# it was introduced for a multi-client crash that later research attributes to a
+# churning watchdog + a regressed newer binary, not a real Neolink limit. The
+# internal-port/go2rtc design is kept in the code behind these envs in case it's
+# ever needed again (set NEOLINK_RTSP_PORT=18554 + AIO_ENABLE_RESTREAM=1).
 RTSP_BIND_ADDR = os.environ.get("NEOLINK_RTSP_BIND_ADDR", "0.0.0.0")
-RTSP_PORT = int(os.environ.get("NEOLINK_RTSP_PORT", "18554"))
+RTSP_PORT = int(os.environ.get("NEOLINK_RTSP_PORT", "8554"))
 
 
 def _render_camera(cam: Camera) -> str:
