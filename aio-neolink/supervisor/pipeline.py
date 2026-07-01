@@ -120,20 +120,14 @@ class SupervisorOptions:
     # straight to it here would defeat the entire point of the restream layer.
     #
     # A diagnostic deploy briefly pointed this at Neolink directly (18554) to rule
-    # out a go2rtc-specific protocol gap; the DESCRIBE 404 was later confirmed (see
-    # config_gen.py, pipeline.py module docstring) to be Neolink's own learning-
-    # phase gate, unrelated to bind address or client protocol. Do not point this
-    # at Neolink directly again — see CLAUDE.md §7.
+    # out a go2rtc-specific protocol gap; the DESCRIBE 404 persisted identically,
+    # which rules go2rtc out too (see CLAUDE.md §7 for the full elimination list:
+    # TOML bind address, base image, go2rtc, camera name, and connection
+    # cleanliness have all been individually disproven as the cause — the actual
+    # cause inside OUR build is still unknown). Restored to go2rtc's public port;
+    # do not point this at Neolink directly again without a fresh reason.
     rtsp_host: str = "127.0.0.1"
-    # TEMPORARY (v0.1.22 diagnostic): pointed at Neolink's internal port (18554)
-    # directly, bypassing go2rtc entirely, to isolate whether go2rtc itself is
-    # what's tripping Neolink's DESCRIBE handling. v0.1.21 ruled out the base
-    # image (same 404 persisted after rebasing onto quantumentangledandy/
-    # neolink:latest); the only remaining difference from the proven-working
-    # live test (Frigate connecting directly, no go2rtc) is go2rtc's presence
-    # in the loop. Revert to 8554 (go2rtc's public port) once this is answered
-    # — see CLAUDE.md §7/§8, nothing but go2rtc may stay pointed at 18554.
-    rtsp_port: int = 18554
+    rtsp_port: int = 8554
     restart_backoff: float = 5.0     # min seconds between full process restarts
     startup_grace: float = 45.0      # seconds after (re)start before silence counts
     # Neolink's RTSP mount answers DESCRIBE with a transient 404 until its internal

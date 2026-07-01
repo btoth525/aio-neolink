@@ -1,5 +1,5 @@
 name: aio-neolink
-version: "0.1.22"
+version: "0.1.23"
 slug: aio_neolink
 description: "Reliable Reolink Baichuan-to-RTSP bridge with self-healing watchdog, PTZ/lights/siren control, and a web GUI"
 url: https://github.com/btoth525/aio-neolink
@@ -28,8 +28,16 @@ options:
   log_level: info
   watchdog_timeout: 120
   health_interval: 30
+  neolink_source_host: ""
+  neolink_source_port: 0
 
 schema:
   log_level: list(trace|debug|info|warn|error)
   watchdog_timeout: int(0,3600)
   health_interval: int(5,600)
+  # STOPGAP (v0.1.23) — advanced/hidden: point go2rtc at an EXTERNAL, already-
+  # working Neolink instance instead of this add-on's own bundled one, while a
+  # DESCRIBE-404 root cause specific to our build is still under investigation
+  # (see restream_gen.py / CLAUDE.md §7). Leave blank/0 for normal operation.
+  neolink_source_host: "str?"
+  neolink_source_port: "int(0,65535)?"

@@ -43,6 +43,19 @@ PUBLIC_RTSP_PORT = int(os.environ.get("PUBLIC_RTSP_PORT", "8554"))
 # by.
 GO2RTC_API_ADDR = os.environ.get("GO2RTC_API_ADDR", "127.0.0.1:1984")
 
+# STOPGAP (v0.1.23): our own bundled Neolink process — same commit, same camera —
+# is not answering DESCRIBE for a reason still under investigation (CLAUDE.md §7
+# has the full elimination list: TOML bind, base image, go2rtc, camera name, and
+# connection cleanliness have all been ruled out individually; the actual cause
+# is still unknown). Until it's found, these let go2rtc source from an EXTERNAL,
+# already-working Neolink instance instead of our own bundled one — e.g. the
+# proven-working `Neolink-latest` add-on, reachable over HA's internal add-on
+# network by its container hostname. This keeps the supervisor/GUI/watchdog/PTZ
+# feature set working on top of a real stream while the root cause is chased.
+# Unset (leave at the defaults) once our own bundled Neolink is fixed.
+NEOLINK_SOURCE_HOST = os.environ.get("NEOLINK_SOURCE_HOST", "127.0.0.1")
+NEOLINK_SOURCE_PORT = os.environ.get("NEOLINK_SOURCE_PORT")
+
 
 def _source_stream(cam: Camera) -> str:
     """Which of Neolink's per-camera mounts go2rtc should pull from.
@@ -71,12 +84,15 @@ def _source_stream(cam: Camera) -> str:
     client, since go2rtc itself was the second connection. Two-way audio isn't
     implemented yet anyway (see ROADMAP.md M4), so there's nothing to lose here.
 
-    Always connects via 127.0.0.1, regardless of what Neolink itself binds to
+    Connects via 127.0.0.1 by default, regardless of what Neolink itself binds to
     (config_gen.RTSP_BIND_ADDR may be "0.0.0.0", a valid bind/listen address but
     not a valid address to connect *to* — go2rtc runs in this same container, so
-    loopback always reaches Neolink either way).
+    loopback always reaches Neolink either way). NEOLINK_SOURCE_HOST/_PORT above
+    can redirect this to an external, already-working Neolink instance instead —
+    see the stopgap note above.
     """
-    return f"rtsp://127.0.0.1:{config_gen.RTSP_PORT}/{cam.name}#backchannel=0"
+    port = NEOLINK_SOURCE_PORT or config_gen.RTSP_PORT
+    return f"rtsp://{NEOLINK_SOURCE_HOST}:{port}/{cam.name}#backchannel=0"
 
 
 def render(cameras: list[Camera]) -> str:

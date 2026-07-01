@@ -305,6 +305,31 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
   this test three times. Route everything through go2rtc instead — and if go2rtc's
   own config for a source ever changes, re-check whether backchannel negotiation
   got re-enabled.
+- **STILL UNRESOLVED as of v0.1.23: our own bundled Neolink never answers DESCRIBE,
+  cause unknown.** A live A/B test proved the camera and Neolink itself are fine —
+  the exact same pinned commit, run through the upstream `Neolink-latest` add-on,
+  streams to Frigate immediately on this camera. Our own bundled Neolink process
+  connects, logs in, and registers its RTSP mount identically, but every DESCRIBE
+  against it 404s forever, with zero further Neolink log output even at
+  RUST_LOG=trace. Individually ruled out, each with a live test, NOT reasoning
+  alone: the TOML bind/schema (v0.1.13), the base image (v0.1.21 — rebased onto
+  `quantumentangledandy/neolink:latest`, identical failure persisted), go2rtc as
+  the client (v0.1.22 — pointed our own probe directly at Neolink, bypassing
+  go2rtc entirely, identical failure), the camera's name containing a hyphen
+  (renamed `movie-room` → `movie_room` to match the working config, identical
+  failure), and stale/overlapping connections (full stop, let the camera's
+  session settle, clean single-connection restart, identical failure). The one
+  untested variable is the exact TOML content itself — the working add-on's
+  config is hand-written by the user, not auto-generated, and might set a field
+  `config_gen.py` never emits. **v0.1.23 ships a stopgap** (`restream_gen.py`'s
+  `NEOLINK_SOURCE_HOST`/`NEOLINK_SOURCE_PORT`, wired through `config.yaml`
+  options) that points go2rtc at an external, already-working Neolink instance
+  instead of our own bundled one, so the supervisor/GUI/watchdog/PTZ stack has a
+  real stream to sit on top of while this is chased further. Whoever picks this
+  up next: get the working add-on's actual `neolink.toml` (it lives outside this
+  MCP session's readable paths — `/addon_configs/<slug>/neolink.toml` — try the
+  HA file editor, SSH, or ask the user directly) and diff it field-by-field
+  against `config_gen.render()`'s output.
 - **Licensing:** Neolink is GPL-3.0. Keep this repo GPL-3.0-compatible.
 - **Placeholders:** all replaced with the real owner (`btoth525`) across `config.yaml`,
   `repository.yaml`, `build.yaml`, and `README.md`. Nothing left to fill in.
