@@ -14,23 +14,21 @@
 #   3. A Python control plane (reolink-aio + FastAPI): PTZ / IR / spotlight / siren,
 #      a self-healing health watchdog, and the web GUI.
 #
-# Base image: quantumentangledandy/neolink:latest, NOT the generic HA Debian base.
-# v0.1.20 diagnosis: our own Neolink binary (built by this repo's CI from the exact
-# same pinned commit, 6e05e7844b5b) connected to the camera, logged in, and
-# registered its RTSP mount identically — but every DESCRIBE against it returned a
-# permanent 404 with zero further Neolink log output even at RUST_LOG=trace,
-# meaning its GStreamer pipeline-construction callback was silently never
-# succeeding. A controlled side-by-side test proved the SAME commit, SAME camera,
-# run via the upstream `Neolink-latest` HA add-on (which is a thin wrapper around
-# this exact upstream image) streamed to Frigate immediately. The only variable
-# that changed was the container: that add-on doesn't hand-pick GStreamer apt
-# packages on a generic Debian base like this Dockerfile used to — it runs inside
-# the image the Neolink maintainers themselves build and test the binary against.
-# Building FROM that image instead removes the guesswork of matching its exact
-# GStreamer plugin set/versions by hand. We still overwrite the binary below with
-# our own CI-pinned build for reproducibility (this image's own commit happened to
-# match ours, but pinning explicitly means a future upstream :latest move can't
-# silently change what we ship).
+# Base image: quantumentangledandy/neolink:latest — and we use the Neolink binary
+# baked into it AS-IS. We no longer compile/download our own.
+#
+# v0.1.24 root cause: for many versions this add-on shipped a Neolink binary built
+# by its OWN CI from a pinned master commit (6e05e7844b5b). That binary connected,
+# logged in, and registered its RTSP mount identically to the working setup — but
+# every DESCRIBE against it returned a permanent 404 with zero further log output
+# even at RUST_LOG=trace. A live A/B test proved the same camera streamed
+# instantly through dm82m's `Neolink-latest` add-on, which is a thin wrapper around
+# THIS image and runs the binary baked into it. The trap: the upstream image was
+# last published over a year ago, so its baked binary is an OLDER master build,
+# while our CI pinned a NEWER commit — and Neolink's Cargo.toml version string
+# stayed "0.6.3-rc.3" across many commits, so "same version" masked that we were
+# actually shipping different, newer, regressed code. Building/pinning our own
+# binary bought us nothing but that regression. Use the image's proven binary.
 ARG BUILD_FROM=quantumentangledandy/neolink:latest
 FROM ${BUILD_FROM}
 
@@ -39,21 +37,17 @@ ENV LANG=C.UTF-8 \
     PIP_BREAK_SYSTEM_PACKAGES=1
 
 # --- Runtime dependencies -----------------------------------------------------------
-# GStreamer itself comes from the base image (see above) — we only need to add the
-# packages this add-on's OWN code needs on top of it: Python for the control plane,
-# curl to fetch the Neolink/go2rtc binaries below.
+# GStreamer AND the Neolink binary both come from the base image — we only add the
+# packages this add-on's OWN code needs on top: Python for the control plane, curl
+# to fetch go2rtc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
         python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Neolink binary (prebuilt by CI, downloaded here) -------------------------------
-# BUILD_ARCH is provided by the HA builder; fetch-neolink.sh maps it to the right
-# published asset and installs /usr/local/bin/neolink.
-ARG BUILD_ARCH
-ENV BUILD_ARCH=${BUILD_ARCH}
-COPY rootfs/fetch-neolink.sh /usr/local/bin/fetch-neolink.sh
-RUN chmod +x /usr/local/bin/fetch-neolink.sh && /usr/local/bin/fetch-neolink.sh
+# --- Neolink binary: use the baked-in /usr/local/bin/neolink from the base image ----
+# (No fetch/compile step — see the base-image comment above for why our own CI build
+# was the bug. run.sh's NEOLINK_BIN already points at /usr/local/bin/neolink.)
 
 # --- go2rtc binary (the restream layer — see restream_gen.py) -----------------------
 COPY rootfs/fetch-go2rtc.sh /usr/local/bin/fetch-go2rtc.sh
