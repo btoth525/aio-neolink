@@ -63,7 +63,7 @@ class ControlIn(BaseModel):
 
 
 def create_app(store: CameraStore, pipeline, restreamer, controls) -> FastAPI:
-    app = FastAPI(title="aio-neolink", version="0.1.13")
+    app = FastAPI(title="aio-neolink", version="0.1.14")
     app.state.store = store
     app.state.pipeline = pipeline
     app.state.restreamer = restreamer
