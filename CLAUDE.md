@@ -158,10 +158,24 @@ compilation is ever preferred over downloading a CI artifact.
 These were written from docs/memory and **must be checked against the actual versions
 you ship** — they are the most likely sources of breakage:
 
-- **Neolink TOML schema** (`config_gen.py`): currently emits a top-level `[[rtsp]]`
-  bind block + `[[cameras]]` blocks. Older Neolink used a flatter `bind = "0.0.0.0:8554"`.
-  Confirm against your exact binary and adjust `render()`.
-- **reolink-aio API** (`control.py`): calls `Host.get_host_data()`, `get_states()`,
+- **Neolink TOML schema — ✅ verified against source, and a real bug found.**
+  `config_gen.py` wrapped `bind`/`bind_port` in a `[[rtsp]]` table for several
+  versions. Checked directly against `src/config.rs` at the pinned commit
+  (6e05e7844b5b): the root `Config` struct has `bind`/`bind_port` as **flat
+  top-level keys** — there is no `[[rtsp]]` table in this schema at all. Neolink
+  silently ignored the unrecognized `[[rtsp]]` block and fell back to its hardcoded
+  defaults (`0.0.0.0:8554` — see `default_bind_addr()`/`default_bind_port()` in
+  config.rs), which meant the "Neolink is internal-only, go2rtc is its only
+  client" architecture (v0.1.11+) was **never actually in effect**: Neolink kept
+  publicly binding the same port go2rtc needed, causing go2rtc's own RTSP listener
+  to fail with "address already in use". Fixed by emitting `bind`/`bind_port` as
+  bare top-level keys before the first `[[cameras]]` block. **Lesson: this section
+  was flagged "must verify against the real binary" from the very first version of
+  this file and was never actually checked until a live failure forced it** — don't
+  let a TODO like that sit unverified through multiple releases again. Whenever
+  `NEOLINK_COMMIT` changes, pull `src/config.rs` at that commit and re-check the
+  schema directly rather than trusting what worked before.
+- **reolink-aio API** (`control.py`) — still unverified, same caution applies: calls `Host.get_host_data()`, `get_states()`,
   `set_ir_lights`, `set_spotlight`, `set_siren`, `set_ptz_command(channel, command=, speed=)`,
   and `supported(channel, feature)`. Pin a reolink-aio version and confirm these
   signatures + the capability flag names (`floodLight` vs `spotlight`, `ir_lights`, `siren`,
