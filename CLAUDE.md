@@ -305,31 +305,33 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
   this test three times. Route everything through go2rtc instead — and if go2rtc's
   own config for a source ever changes, re-check whether backchannel negotiation
   got re-enabled.
-- **STILL UNRESOLVED as of v0.1.23: our own bundled Neolink never answers DESCRIBE,
-  cause unknown.** A live A/B test proved the camera and Neolink itself are fine —
-  the exact same pinned commit, run through the upstream `Neolink-latest` add-on,
-  streams to Frigate immediately on this camera. Our own bundled Neolink process
-  connects, logs in, and registers its RTSP mount identically, but every DESCRIBE
-  against it 404s forever, with zero further Neolink log output even at
-  RUST_LOG=trace. Individually ruled out, each with a live test, NOT reasoning
-  alone: the TOML bind/schema (v0.1.13), the base image (v0.1.21 — rebased onto
-  `quantumentangledandy/neolink:latest`, identical failure persisted), go2rtc as
-  the client (v0.1.22 — pointed our own probe directly at Neolink, bypassing
-  go2rtc entirely, identical failure), the camera's name containing a hyphen
-  (renamed `movie-room` → `movie_room` to match the working config, identical
-  failure), and stale/overlapping connections (full stop, let the camera's
-  session settle, clean single-connection restart, identical failure). The one
-  untested variable is the exact TOML content itself — the working add-on's
-  config is hand-written by the user, not auto-generated, and might set a field
-  `config_gen.py` never emits. **v0.1.23 ships a stopgap** (`restream_gen.py`'s
-  `NEOLINK_SOURCE_HOST`/`NEOLINK_SOURCE_PORT`, wired through `config.yaml`
-  options) that points go2rtc at an external, already-working Neolink instance
-  instead of our own bundled one, so the supervisor/GUI/watchdog/PTZ stack has a
-  real stream to sit on top of while this is chased further. Whoever picks this
-  up next: get the working add-on's actual `neolink.toml` (it lives outside this
-  MCP session's readable paths — `/addon_configs/<slug>/neolink.toml` — try the
-  HA file editor, SSH, or ask the user directly) and diff it field-by-field
-  against `config_gen.render()`'s output.
+- **RESOLVED in v0.1.25 — the DESCRIBE-404 saga's ending, and the final
+  architecture.** The permanent DESCRIBE 404 was fixed by two changes landed
+  together after every single-variable test failed:
+  1. **v0.1.24: use the Neolink binary BAKED INTO `quantumentangledandy/neolink:
+     latest`** instead of our own CI build. Research found that image was last
+     published over a year ago — its binary is an older, proven master build,
+     while our CI pinned a NEWER master commit that Cargo.toml still labeled
+     "0.6.3-rc.3". The unchanged version string masked that we were shipping
+     different, newer, regressed code the whole time. (v0.1.24 alone still
+     404'd, but via go2rtc/port 18554.)
+  2. **v0.1.25: Neolink serves Frigate DIRECTLY on the public :8554; go2rtc
+     disabled by default** (still in the code behind `AIO_ENABLE_RESTREAM=1` +
+     `NEOLINK_RTSP_PORT=18554`). This exactly replicates the proven-working
+     `Neolink-latest` add-on's shape: same baked binary, same default port, no
+     restream layer.
+  **Confirmed live:** watchdog healthy/connected, `camera.movie_room` =
+  `recording` in Frigate, and Neolink's own logs showed TWO simultaneous RTSP
+  sessions (Frigate + the watchdog's persistent connection) streaming without
+  any crash — so the "Neolink can't serve 2 clients" limit that justified
+  go2rtc (§7 above) was a symptom of the regressed newer binary + the old
+  churning watchdog, not a real limit of the proven build. The go2rtc layer and
+  the whole CI-build pipeline (build-neolink.yml, fetch-neolink.sh) are now
+  dead weight kept only as fallback options; a future cleanup can delete them.
+  **Lessons:** (a) a version string is not a build identity — pin by what
+  actually runs in the proven environment, not by what the label says matches;
+  (b) when replicating a working system, replicate its *shape* first (binary,
+  port, topology) before theorizing about deeper causes.
 - **Licensing:** Neolink is GPL-3.0. Keep this repo GPL-3.0-compatible.
 - **Placeholders:** all replaced with the real owner (`btoth525`) across `config.yaml`,
   `repository.yaml`, `build.yaml`, and `README.md`. Nothing left to fill in.
@@ -370,7 +372,23 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
 
 ---
 
-*Last updated: v0.1.21 — the persistent DESCRIBE 404 was ultimately traced past the
+*Last updated: v0.1.25 — WORKING END TO END, confirmed live: camera →
+baked-in Neolink binary (from `quantumentangledandy/neolink:latest`, used
+as-is — our own CI-built binary was a silently newer, regressed commit and is
+no longer used) → RTSP directly on :8554 → Frigate `recording`, with the
+supervisor's persistent-connection watchdog simultaneously connected and
+healthy (two concurrent clients, no crash — the go2rtc restream layer is now
+DISABLED by default and kept only as an option, see §7's "RESOLVED in
+v0.1.25" entry for the full story and lessons). The watchdog remains the core
+deliverable: 120s of sustained stream silence → automatic Neolink restart,
+which is the self-heal for the original "stream falls off after a while and
+never comes back" incident this project exists to fix. Next steps: §6.3
+acceptance test (kill -STOP the neolink pid, watch it self-heal), §6.4
+features pass (PTZ/lights/siren via GUI), then cleanup (delete
+build-neolink.yml / fetch-neolink.sh / restream code if the direct
+architecture holds).*
+
+*Previous history (v0.1.21): the persistent DESCRIBE 404 was ultimately traced past the
 watchdog fix (v0.1.19) to the container image itself: our own CI-built Neolink
 binary connected, logged in, and registered its RTSP mount identically on our
 generic `ghcr.io/home-assistant/*-base-debian:bookworm` image, but its GStreamer
