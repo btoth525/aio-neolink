@@ -18,21 +18,17 @@ Neolink binds on an internal, non-public port — see restream_gen.py for why: g
 is meant to be the sole real client, republishing to the outside world (Frigate,
 VLC, etc.) on the public port this add-on has always used.
 
-TEMPORARY: bind address reverted to 0.0.0.0 (was 127.0.0.1). With loopback-only
-binding, BOTH go2rtc's client (which never sends OPTIONS before DESCRIBE) AND this
-add-on's own OPTIONS-first probe got an identical, persistent "RTSP/1.0 404 Not
-Found" on DESCRIBE — reproduced across multiple restart cycles and minutes of a
-stable run, ruling out a startup race and ruling out any client-side protocol
-difference. Neolink's own permission/role source (gst/factory.rs, gst/server.rs)
-was checked directly and looks internally consistent for anonymous access with no
-configured users, so no obvious code bug was found there either. 0.0.0.0 is the
-one remaining variable that has ever actually been proven to work (weeks of VLC
-and Frigate access on the old public bind); reverting it here, on the still-
-internal port 18554 (unknown to Frigate, not exposed as an add-on port), isolates
-whether loopback binding itself is what broke this. If this fixes it, the
-"internal-only" protection is weaker (0.0.0.0:18554 is technically reachable from
-the LAN, not just this container) but the port is still non-public/undocumented,
-which is a reasonable interim trade-off over a completely non-functional stream.
+RESOLVED: the persistent "RTSP/1.0 404 Not Found" on DESCRIBE was never a bind-
+address or TOML-schema issue. Confirmed directly against Neolink's source
+(src/rtsp/mod.rs, src/rtsp/gst/factory.rs, src/rtsp/factory.rs at the pinned
+commit): Neolink registers a dummy RTSP mount immediately at startup (the
+"Available at ..." log line), but that mount intentionally 404s on DESCRIBE until
+an internal learning phase (buffering frames until it knows both codecs, or has
+>10 frames) completes — OPTIONS succeeds immediately since it only needs the
+mount to exist, DESCRIBE doesn't until the pipeline can actually be built. See
+pipeline.py's module docstring for the watchdog-side fix (a never-connected
+camera was being restarted before this phase could ever finish). Bind address
+stays 0.0.0.0 — it was never the cause.
 """
 from __future__ import annotations
 

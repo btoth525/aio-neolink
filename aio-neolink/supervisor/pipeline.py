@@ -46,6 +46,29 @@ Recovery
 3. `restart_backoff` prevents restart storms when a camera is genuinely offline.
 4. go2rtc restarts independently of Neolink (see restream.py) — a Neolink restart
    doesn't need to also drop every downstream client's connection to go2rtc.
+
+Why a never-connected camera gets a longer leash than a hung one
+------------------------------------------------------------------
+Confirmed directly against Neolink's source (src/rtsp/mod.rs, src/rtsp/gst/factory.rs,
+src/rtsp/factory.rs at the pinned commit): Neolink registers a dummy RTSP mount for
+each camera immediately at startup (the "Available at ..." log line), but that mount
+intentionally answers DESCRIBE with 404 until an internal "learning phase" completes
+— it buffers frames from the camera until it has >10 frames or knows both the video
+and audio codec, and only then can it build the real GStreamer pipeline a DESCRIBE
+needs. OPTIONS succeeds immediately (it only needs the mount to exist); DESCRIBE
+404s until learning finishes. This is normal Neolink behavior, not a hang.
+
+The watchdog restarting Neolink because a camera has never yet completed a
+handshake is actively self-defeating: a restart throws away the learning-phase
+progress and starts it over, which can create an infinite loop where the camera
+never gets long enough between restarts to finish learning — this was confirmed
+live in supervisor logs (`neolink exited with code -15` on a ~120s cycle, i.e.
+exactly `watchdog_timeout`) and produced the symptom "Frigate got an initial
+stream but it didn't hold" — Frigate happened to catch a brief post-learning
+window right before the next forced restart. `first_connect_timeout` gives a
+camera that's never connected a much longer window before the watchdog gives up
+and restarts it, while `watchdog_timeout` still applies at full strength once a
+camera has proven it can stream and then goes silent (the original incident).
 """
 from __future__ import annotations
 
@@ -84,6 +107,7 @@ class CameraHealth:
     last_byte_at: float = 0.0    # monotonic time of the last byte seen on the persistent session
     last_error: str = ""
     healthy: bool = False
+    ever_connected: bool = False  # has this camera EVER completed a handshake since it was added?
 
 
 @dataclass
@@ -95,17 +119,26 @@ class SupervisorOptions:
     # (config_gen.py) and must only ever have go2rtc as a real client; connecting
     # straight to it here would defeat the entire point of the restream layer.
     #
-    # A diagnostic deploy pointed this at Neolink directly (18554) for one round to
-    # rule out a go2rtc-specific protocol gap (it never sends OPTIONS before
-    # DESCRIBE) — this add-on's own OPTIONS-first probe got the identical 404,
-    # which ruled that out and pointed at the loopback bind address itself (see
-    # config_gen.py). Restored to go2rtc's public port now that the bind address
-    # is the thing being tested instead. Do not point this at Neolink directly
-    # again without the same rationale — see CLAUDE.md §7.
+    # A diagnostic deploy briefly pointed this at Neolink directly (18554) to rule
+    # out a go2rtc-specific protocol gap; the DESCRIBE 404 was later confirmed (see
+    # config_gen.py, pipeline.py module docstring) to be Neolink's own learning-
+    # phase gate, unrelated to bind address or client protocol. Do not point this
+    # at Neolink directly again — see CLAUDE.md §7.
     rtsp_host: str = "127.0.0.1"
     rtsp_port: int = 8554
     restart_backoff: float = 5.0     # min seconds between full process restarts
     startup_grace: float = 45.0      # seconds after (re)start before silence counts
+    # Neolink's RTSP mount answers DESCRIBE with a transient 404 until its internal
+    # "learning phase" (buffering frames to detect video/audio codecs) completes —
+    # this is normal, documented Neolink behavior, not a hang (see CLAUDE.md §7).
+    # A camera that has NEVER completed a handshake since being added is still in
+    # (or stuck before) that learning phase, not necessarily hung the way the
+    # original incident's silent-RTP failure was. Restarting Neolink mid-learning-
+    # phase throws away that progress and restarts the phase from zero, so a short
+    # watchdog_timeout on top of a never-connected camera can loop forever without
+    # ever letting the phase finish. Give first-connection a much longer leash than
+    # a genuine "was streaming, went silent" hang.
+    first_connect_timeout: int = 600  # seconds of never-connected before restarting
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +200,7 @@ class _CameraMonitor:
             # stream will simply never advance last_byte_at again; a healthy one
             # advances it continuously below.
             self.health.connected = True
+            self.health.ever_connected = True
             self.health.last_byte_at = time.monotonic()
             self.health.last_error = ""
 
@@ -468,14 +502,24 @@ class PipelineManager:
                 h.healthy = True
                 continue
 
+            # Distinguish "never connected yet" (still in Neolink's learning phase,
+            # or waiting on it) from "was streaming, then went silent" (the actual
+            # hang this watchdog exists to catch) — see first_connect_timeout above.
+            threshold = (
+                self.opts.watchdog_timeout
+                if h.ever_connected
+                else self.opts.first_connect_timeout
+            )
+
             h.healthy = False
             if not h.last_error:
                 h.last_error = "no RTP data received (stream may be hung)"
             log.warning(
-                "camera %s unhealthy: %s — silent %.0fs (restart threshold %ss)",
-                cam.name, h.last_error, silent_for, self.opts.watchdog_timeout,
+                "camera %s unhealthy: %s — silent %.0fs (restart threshold %ss%s)",
+                cam.name, h.last_error, silent_for, threshold,
+                "" if h.ever_connected else ", never connected yet",
             )
-            if silent_for >= self.opts.watchdog_timeout:
+            if silent_for >= threshold:
                 unhealthy.append(cam.name)
 
         if unhealthy:

@@ -267,6 +267,37 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
   not Neolink directly — Neolink has exactly one client (go2rtc) for its entire
   lifetime, and go2rtc is purpose-built to safely fan that one feed out to any
   number of downstream consumers (Frigate, VLC, the watchdog itself).
+  6. **v0.1.19 found the real cause of the persistent DESCRIBE 404 (unrelated to
+     Neolink's single-client limit above, but discovered while chasing the same
+     stream)** — and a
+     second, self-inflicted bug that made it much worse. Confirmed directly
+     against Neolink's source at the pinned commit (`src/rtsp/mod.rs`,
+     `src/rtsp/gst/factory.rs`, `src/rtsp/factory.rs`): Neolink registers a dummy
+     RTSP mount for each camera immediately at startup (the "Available at ..."
+     log line fires here), but that mount intentionally answers DESCRIBE with 404
+     until an internal **learning phase** completes — it buffers frames from the
+     camera until it has >10 frames or knows both the video and audio codec,
+     only then building the real pipeline a DESCRIBE needs. OPTIONS succeeds
+     immediately (it only needs the mount to exist); DESCRIBE doesn't until
+     learning finishes. This is normal Neolink behavior, not a hang, not a TOML
+     bug, not a bind-address issue — all ruled out over v0.1.13–v0.1.18 chasing
+     the wrong layer. The watchdog in `pipeline.py` made this far worse: it
+     treated "never connected yet" identically to "connected then went silent,"
+     so it force-restarted Neolink on the same `watchdog_timeout` (120s) even
+     though a restart throws away learning-phase progress and starts it over —
+     an infinite loop where the camera could never get enough uninterrupted time
+     to finish learning. This exactly matched the observed symptom "Frigate got
+     an initial stream but it didn't hold" (confirmed in supervisor logs:
+     `neolink exited with code -15` on a ~120s cycle) — Frigate briefly caught a
+     post-learning window right before the next forced restart. Fixed by adding
+     `CameraHealth.ever_connected` and a separate `first_connect_timeout` (600s)
+     that only applies before a camera's first successful handshake;
+     `watchdog_timeout` still applies at full strength once a camera has proven
+     it can stream and then goes silent (the original incident this project
+     exists to fix). **Lesson: a "stream not ready yet" 404 and a "stream is
+     hung" silence look identical from outside if the watchdog doesn't track
+     which one it's looking at — always distinguish first-connection from
+     lost-connection before choosing a restart threshold.**
 
   **Do not connect anything directly to Neolink's internal RTSP port again** —
   not the GUI, not the watchdog, nothing — without first proving, with real logs
@@ -314,16 +345,22 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
 
 ---
 
-*Last updated: v0.1.12 — go2rtc now sits between Neolink and the world (Neolink is
-localhost-only, internal port 18554; go2rtc republishes on the public :8554
-Frigate has always used) because Neolink was proven, by direct testing, unable to
-safely serve more than one simultaneous RTSP client on the same camera — not a
-churn issue, confirmed even after the watchdog was rewritten to hold a single
-persistent connection. Putting go2rtc in front (v0.1.11) was the right
-architecture but the crash still reproduced, because go2rtc's own default
-ONVIF backchannel (two-way-audio) negotiation against Neolink was itself acting as
-a second client; v0.1.12 disables it (`#backchannel=0` on every source URL in
-restream_gen.py). The watchdog watches go2rtc's public endpoint instead of Neolink
-directly. Neolink rc.3 is still built by this repo's own CI and downloaded at
-image-build time (no on-device compile). Keep this current — it's the contract
-between sessions.*
+*Last updated: v0.1.19 — the persistent RTSP DESCRIBE 404 that blocked the stream
+for several versions is understood and fixed. Root cause, confirmed against
+Neolink's pinned-commit source: Neolink's RTSP mounts intentionally 404 on
+DESCRIBE until an internal per-camera learning phase (buffering frames until it
+knows both codecs, or has >10 frames) completes — normal behavior, not a hang,
+not a TOML/bind-address bug. The watchdog in `pipeline.py` was restarting Neolink
+before that phase could ever finish (treating "never connected" the same as "went
+silent after connecting"), which explained the "Frigate got a stream but it
+didn't hold" symptom exactly. Fixed with `CameraHealth.ever_connected` +
+`first_connect_timeout` (600s) so first-connection gets a much longer leash than
+a genuine post-connection hang, which still restarts at `watchdog_timeout` (120s)
+as before. Underneath all of this, go2rtc still sits between Neolink and the
+world (Neolink localhost-only on internal port 18554; go2rtc republishes on the
+public :8554 Frigate has always used) because Neolink was proven, by direct
+testing, unable to safely serve more than one simultaneous RTSP client on the
+same camera (§7) — that architecture is unrelated to and unaffected by the
+DESCRIBE-404 fix above. Neolink rc.3 is still built by this repo's own CI and
+downloaded at image-build time (no on-device compile). Keep this current — it's
+the contract between sessions.*
