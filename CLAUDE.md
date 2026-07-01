@@ -169,9 +169,9 @@ Once it streams, simulate the **exact** original failure (a hang, not a crash):
 # inside the add-on container
 kill -STOP <neolink_pid>     # freeze the process — RTSP goes silent but PID lives
 ```
-Watch the supervisor log. Within roughly `watchdog_timeout` (default 120s, reached as
-`health_interval 30s × failures_before_restart 4`) it should detect sustained silence and
-restart the pipeline, and the camera should return to `live` on its own. **If this passes,
+Watch the supervisor log. Within roughly `watchdog_timeout` (default 120s) it should
+detect that its persistent per-camera RTSP connection has gone silent and restart the
+pipeline, and the camera should return to `live` on its own. **If this passes,
 the core mission is met.** Note the watchdog is deliberately tolerant: it restarts only on
 *sustained* failure, because bouncing Neolink drops every client (Frigate included) and a
 hair-trigger watchdog actively prevents a merely-flaky feed from settling.
@@ -209,14 +209,29 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
   `control.py` currently requires a wired address — battery control is a TODO.
 - **Watchdog restart backoff** (`restart_backoff`, default 5s) prevents restart loops —
   don't remove it.
-- **No GUI-side RTSP client.** v0.1.3–0.1.8 had a live MJPEG preview in the web GUI
-  (first via ffmpeg, then via `gst-launch`). Both implementations opened a second
-  RTSP connection to Neolink that could land mid-negotiation and trip Neolink's own
-  RTSP pipeline (`GStreamer-RTSP-Server-CRITICAL: could not create element`, followed
-  by dropped frames). It was removed in v0.1.9. **Do not re-add a preview/snapshot
-  feature that opens its own RTSP connection to the local Neolink instance** without
-  first proving — with real logs — that it cannot destabilize the stream Frigate
-  depends on. That stream holding is the entire point of this project.
+- **Nothing may repeatedly open/close RTSP connections against Neolink.** This has
+  caused two separate real regressions, both traced to the same root cause: Neolink
+  runs a *shared* per-camera GStreamer pipeline, and repeated attach/detach cycles
+  from any client race with other concurrently-connected clients (Frigate) inside
+  that shared pipeline, corrupting internal GStreamer state.
+  1. v0.1.3–0.1.8 had a live MJPEG preview in the web GUI (ffmpeg, then
+     `gst-launch`) that opened a fresh RTSP connection whenever the GUI rendered —
+     removed entirely in v0.1.9 (`GStreamer-RTSP-Server-CRITICAL: could not create
+     element`, dropped frames).
+  2. The watchdog's own health probe originally reconnected every `health_interval`
+     (SETUP → PLAY → TEARDOWN, repeated). Harmless alone, but once Frigate was
+     *also* connected continuously, the probe's periodic churn crashed Neolink
+     outright (`gst_poll_write_control: assertion 'set != NULL' failed`, flooding
+     until the process died with SIGTRAP). Fixed by rearchitecting the watchdog
+     (`pipeline.py`, `_CameraMonitor`) to hold **one persistent connection per
+     camera** for the life of a healthy stream, and just watch it for silence —
+     Neolink never sees more churn than a single steady client, matching what a
+     lone VLC connection already proved was safe.
+
+  **Do not reintroduce periodic reconnect/probe cycles or a GUI-side RTSP client**
+  without first proving — with real logs, cameras connected via both this add-on
+  AND Frigate simultaneously — that it can't destabilize the shared stream. Holding
+  that stream is the entire point of this project.
 - **Licensing:** Neolink is GPL-3.0. Keep this repo GPL-3.0-compatible.
 - **Placeholders:** all replaced with the real owner (`btoth525`) across `config.yaml`,
   `repository.yaml`, `build.yaml`, and `README.md`. Nothing left to fill in.
@@ -228,13 +243,15 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
 - Don't rewrite the Baichuan video parsing in Python "to drop Neolink" — that's the
   hard reverse-engineered part; the architecture deliberately keeps Neolink for video.
 - Don't replace the relative GUI paths with absolute ones (breaks Ingress).
-- Don't make the watchdog restart on a single probe failure — require sustained failure
-  (`failures_before_restart`, derived from `watchdog_timeout / health_interval`) to
-  avoid bouncing on transient blips. Restarting Neolink drops every connected client
-  (Frigate included) and forces a cold camera re-negotiation, so an eager watchdog
-  actively prevents a merely-flaky feed from ever stabilising.
-- Don't add anything to the image that opens its own RTSP connection to the local
-  Neolink instance (see §7) — it has already caused a real regression once.
+- Don't make the watchdog restart on a brief silence — require `watchdog_timeout`
+  seconds of *sustained* silence on the persistent per-camera connection before
+  restarting. Restarting Neolink drops every connected client (Frigate included)
+  and forces a cold camera re-negotiation, so an eager watchdog actively prevents a
+  merely-flaky feed from ever stabilising.
+- Don't add anything to the image — GUI feature or watchdog logic — that opens more
+  than one RTSP connection per camera, or that reconnects on a cycle instead of
+  holding a session open (see §7) — this has already caused two real regressions,
+  including a full Neolink crash once a second client was present.
 - Don't store secrets anywhere outside `/data`.
 
 ---

@@ -25,8 +25,10 @@ function stateFor(name) {
   const h = health[name];
   if (!h) return { cls: "warn", label: "Starting", note: "" };
   if (h.healthy) return { cls: "live", label: "Live", note: "" };
-  if (h.consecutive_failures && h.consecutive_failures < 2)
-    return { cls: "warn", label: "Recovering", note: h.last_error || "" };
+  // Not yet connected (startup, or reconnecting after a drop) reads as still
+  // trying; connected-but-silent-past-threshold is the real down state, since a
+  // restart is imminent or already underway.
+  if (!h.connected) return { cls: "warn", label: "Recovering", note: h.last_error || "" };
   return { cls: "down", label: "Down", note: h.last_error || "no signal" };
 }
 

@@ -16,17 +16,24 @@ left from here is hardening and features, not blockers.
   firmware; rc.3 (an in-development version one step ahead of any release) is what
   the original working add-on ran, and is what this one ships now. No Rust compiles
   on the Home Assistant device.
-- **Self-healing watchdog** — `pipeline.py` runs a real RTSP+RTP session
-  (`OPTIONS → DESCRIBE → SETUP → PLAY`, then waits for RTP bytes) against each
-  camera every `health_interval` seconds. This is a pure-Python asyncio probe, no
-  external tools — it catches the exact "port open, OPTIONS returns 200, but no
-  frames" hang that caused the original 29-hour outage, which a shallower probe
-  would miss entirely.
-- **Tolerant restart policy** — the watchdog only restarts Neolink after *sustained*
-  failure (`watchdog_timeout / health_interval` consecutive probe failures, 4 by
-  default), not on the first blip. An eager watchdog was found, in practice, to
-  actively prevent a merely-flaky feed from ever stabilizing, since every restart
-  drops all clients (Frigate included) and forces a cold camera renegotiation.
+- **Self-healing watchdog, one persistent connection per camera** — `pipeline.py`
+  opens a single RTSP session (`OPTIONS → DESCRIBE → SETUP → PLAY`) per camera and
+  holds it open, timestamping every byte that arrives. Every `health_interval`
+  seconds the supervisor just checks how long that connection has been silent — it
+  never reconnects on a cycle. This catches the exact "port open, OPTIONS returns
+  200, but no frames" hang that caused the original 29-hour outage, without adding
+  any connection churn of its own. (An earlier version reconnected every cycle and
+  was found to crash Neolink once a second real client, Frigate, was also
+  connected — the repeated attach/detach raced with Frigate's live session inside
+  Neolink's shared pipeline. Fixed by holding one steady connection instead.)
+- **Tolerant restart policy** — the watchdog only restarts Neolink after
+  `watchdog_timeout` seconds of *sustained* silence on that connection, not on the
+  first blip. An eager watchdog was found, in practice, to actively prevent a
+  merely-flaky feed from ever stabilizing, since every restart drops all clients
+  (Frigate included) and forces a cold camera renegotiation.
+- **Instant restart on crash** — if Neolink dies on its own (segfault, panic,
+  OOM-kill) the supervisor notices from the process exit immediately, rather than
+  waiting for the silence timer above to elapse.
 - **Camera store + TOML generation** — add a camera in the GUI → `neolink.toml`
   regenerated → pipeline restarted. No hand-editing.
 - **REST API + GUI** — list/add/delete cameras, probe capabilities, per-camera

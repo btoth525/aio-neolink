@@ -210,8 +210,8 @@ All options live in the add-on's **Configuration tab** in HA:
 | Option | Default | Description |
 |---|---|---|
 | `log_level` | `info` | `trace` / `debug` / `info` / `warn` / `error` |
-| `watchdog_timeout` | `120` | Seconds of *sustained* stream silence before a forced restart. `0` disables the watchdog entirely. |
-| `health_interval` | `30` | Seconds between health probes. The number of consecutive failures needed to trigger a restart is derived as `watchdog_timeout / health_interval` (4, by default). |
+| `watchdog_timeout` | `120` | Seconds of *sustained* stream silence — no RTP bytes on the watchdog's persistent connection — before a forced restart. `0` disables the watchdog entirely. |
+| `health_interval` | `30` | Seconds between silence checks against that connection. Lower means a hang is noticed sooner; it does **not** mean more RTSP connections, since only one is ever held open per camera. |
 
 Changes take effect after clicking **Save** and then **Restart** on the add-on Info tab.
 
@@ -226,8 +226,8 @@ the 29-hour outage with zero recovery that this project exists to fix.
 
 ## How the self-heal works
 
-Every `health_interval` seconds, the supervisor runs a full RTSP health check
-against the live stream:
+Each enabled camera gets **one persistent RTSP session**, held open for as long as
+the stream is healthy:
 
 ```
 1. TCP connect to localhost:8554
@@ -235,18 +235,34 @@ against the live stream:
 3. Send RTSP DESCRIBE →  expect SDP with media tracks
 4. Send RTSP SETUP    →  request interleaved TCP transport on the actual track URL
 5. Send RTSP PLAY     →  start the stream
-6. Wait up to 20s for any RTP byte
+6. Read continuously, timestamping every byte that arrives
 ```
 
-If step 6 times out — meaning Neolink's RTSP server is responding to session setup
-but not sending frames, the exact hang that caused the original silent outage — it
-counts as one failure. After `watchdog_timeout / health_interval` consecutive
-failures, the supervisor restarts Neolink, and the failure counter resets so a
-single post-restart hiccup can't immediately re-trigger another restart.
+That's it — no reconnecting every cycle. Every `health_interval` seconds, the
+supervisor just checks how long it's been since that one connection last saw a
+byte. If it's been silent for `watchdog_timeout` seconds — meaning Neolink's RTSP
+server accepted the session but stopped sending frames, the exact hang that caused
+the original outage — the supervisor restarts Neolink. A fresh restart gets a
+45-second grace period before silence is judged at all, since Neolink needs time to
+renegotiate with the camera first.
 
-A brand-new restart also gets a 45-second grace period where probe failures are
-logged but not counted — Neolink needs time to renegotiate with the camera before
-its RTSP server is fully serving frames.
+**Why only one connection, held open, instead of reconnecting periodically:** an
+earlier version of this watchdog opened a brand-new session every `health_interval`
+seconds. That worked with a single steady client but was found to crash Neolink
+once a second real client (Frigate) was *also* connected continuously — the
+watchdog's repeated connect/disconnect cycles raced with Frigate's live session
+inside Neolink's shared per-camera pipeline, corrupting internal GStreamer state
+and killing the process. Holding one steady connection open, the same as a single
+VLC session, avoids that churn entirely: Neolink never sees more than one extra
+"quiet" client, no matter how long the add-on runs.
+
+**A crash is handled separately, and faster.** If the Neolink process dies on its
+own (the failure above, a segfault, an OOM-kill — anything besides hanging while
+still alive) the supervisor notices immediately from the process exit, not from the
+next silence check, and restarts it right away. The silence-based path exists
+specifically for the *hang* failure mode (process alive, stream dead); an actual
+crash doesn't need to wait, since there's no flaky-feed risk in restarting
+something that's already gone.
 
 ---
 
@@ -265,10 +281,7 @@ kill -STOP $(pidof neolink)
 Watch the add-on log. Within roughly `watchdog_timeout` seconds you'll see:
 
 ```
-camera movie_room probe failed: no RTP data within 20s (stream may be hung) — 1/4 in a row, silent 30s
-camera movie_room probe failed: no RTP data within 20s (stream may be hung) — 2/4 in a row, silent 60s
-camera movie_room probe failed: no RTP data within 20s (stream may be hung) — 3/4 in a row, silent 90s
-camera movie_room probe failed: no RTP data within 20s (stream may be hung) — 4/4 in a row, silent 120s
+camera movie_room unhealthy: no RTP data received (stream may be hung) — silent 120s (restart threshold 120s)
 stopping neolink (SIGTERM)
 neolink (re)started: unhealthy cameras: ['movie_room']
 ```
@@ -369,6 +382,31 @@ curl -X POST http://homeassistant.local:8099/api/cameras/movie_room/control \
 - A camera that's also being hit by another client (an old add-on, a phone app
   still connected) can starve the RTSP session; make sure nothing else is pulling
   the Baichuan connection on port 9000
+- `neolink exited with code -5` in the log means Neolink crashed (not hung); the
+  supervisor restarts it immediately when this happens, no need to wait. Versions
+  before the watchdog was rearchitected to hold one persistent connection per
+  camera (rather than reconnecting every health check) could trigger this crash
+  themselves once Frigate was also connected — if you still see it after updating,
+  something else is generating rapid connect/disconnect churn against `:8554`. A
+  common cause: **Frigate has a camera pointed at this add-on that isn't actually
+  configured here.** That shows up in Frigate's own log as
+  `method DESCRIBE failed: 404 Not Found` repeating every ~20 seconds for a camera
+  name you didn't add via this add-on's GUI — either add that camera here too, or
+  point Frigate's entry for it somewhere else. Either way, stop it from hammering
+  `:8554` for a stream that doesn't exist.
+- If Frigate logs `Error during demuxing: Connection timed out` for a camera that
+  *is* configured here, try forcing TCP transport in `frigate.yml` (UDP is more
+  prone to timeouts on this kind of bridged stream):
+  ```yaml
+  cameras:
+    movie_room:
+      ffmpeg:
+        inputs:
+          - path: rtsp://192.168.1.x:8554/movie_room
+            input_args: preset-rtsp-restream
+            roles: [detect, record]
+  ```
+  (`preset-rtsp-restream` is Frigate's built-in TCP-transport ffmpeg preset.)
 
 **PTZ / lights not working**
 - These require the camera to support the feature — click **Test connection** to see
