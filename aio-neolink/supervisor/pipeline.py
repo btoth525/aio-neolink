@@ -375,10 +375,22 @@ class PipelineManager:
             log.info("no enabled cameras; not starting neolink")
             return
         log.info("starting neolink")
+        # Neolink is a Rust binary using env_logger — it reads RUST_LOG, not this
+        # add-on's own `log_level` option (that only configures the Python
+        # supervisor's logging, via AIO_NEOLINK_LOG_LEVEL in main.py/run.sh).
+        # Without this, Neolink silently stays at its own default verbosity no
+        # matter what the add-on's log_level option is set to, which meant a
+        # "trace" log_level never actually produced any more detail from Neolink
+        # itself — a real gap while diagnosing why a stream stalls before its
+        # first frame.
+        env = dict(os.environ)
+        aio_level = os.environ.get("AIO_NEOLINK_LOG_LEVEL", "info").lower()
+        env["RUST_LOG"] = f"neolink={aio_level},neolink_core={aio_level}"
         self._proc = await asyncio.create_subprocess_exec(
             NEOLINK_BIN, "rtsp", "--config", str(config_gen.NEOLINK_CONFIG),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=env,
         )
         asyncio.create_task(self._drain_logs(self._proc))
 
