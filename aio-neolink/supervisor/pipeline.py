@@ -125,7 +125,15 @@ class SupervisorOptions:
     # phase gate, unrelated to bind address or client protocol. Do not point this
     # at Neolink directly again — see CLAUDE.md §7.
     rtsp_host: str = "127.0.0.1"
-    rtsp_port: int = 8554
+    # TEMPORARY (v0.1.22 diagnostic): pointed at Neolink's internal port (18554)
+    # directly, bypassing go2rtc entirely, to isolate whether go2rtc itself is
+    # what's tripping Neolink's DESCRIBE handling. v0.1.21 ruled out the base
+    # image (same 404 persisted after rebasing onto quantumentangledandy/
+    # neolink:latest); the only remaining difference from the proven-working
+    # live test (Frigate connecting directly, no go2rtc) is go2rtc's presence
+    # in the loop. Revert to 8554 (go2rtc's public port) once this is answered
+    # — see CLAUDE.md §7/§8, nothing but go2rtc may stay pointed at 18554.
+    rtsp_port: int = 18554
     restart_backoff: float = 5.0     # min seconds between full process restarts
     startup_grace: float = 45.0      # seconds after (re)start before silence counts
     # Neolink's RTSP mount answers DESCRIBE with a transient 404 until its internal
