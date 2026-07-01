@@ -18,8 +18,8 @@ how many things (Frigate, VLC, this add-on's own health check) connect downstrea
 
 The external contract is unchanged: go2rtc publishes each camera at
 rtsp://<host>:8554/<camera_name>, the exact URL this add-on has always advertised.
-Neolink itself moves to a localhost-only, internal port (see config_gen.py) that
-nothing outside this container can reach.
+Neolink itself moves to a separate, internal, non-public port (see config_gen.py)
+that Frigate/VLC/etc. never see or connect to directly.
 """
 from __future__ import annotations
 
@@ -70,8 +70,13 @@ def _source_stream(cam: Camera) -> str:
     almost certainly what let a crash happen even with go2rtc as the "only"
     client, since go2rtc itself was the second connection. Two-way audio isn't
     implemented yet anyway (see ROADMAP.md M4), so there's nothing to lose here.
+
+    Always connects via 127.0.0.1, regardless of what Neolink itself binds to
+    (config_gen.RTSP_BIND_ADDR may be "0.0.0.0", a valid bind/listen address but
+    not a valid address to connect *to* — go2rtc runs in this same container, so
+    loopback always reaches Neolink either way).
     """
-    return f"rtsp://{config_gen.RTSP_BIND_ADDR}:{config_gen.RTSP_PORT}/{cam.name}#backchannel=0"
+    return f"rtsp://127.0.0.1:{config_gen.RTSP_PORT}/{cam.name}#backchannel=0"
 
 
 def render(cameras: list[Camera]) -> str:

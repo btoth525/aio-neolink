@@ -14,9 +14,25 @@ see default_bind_addr()/default_bind_port() in config.rs), meaning the
 against src/config.rs whenever NEOLINK_COMMIT changes in build-neolink.yml — don't
 assume TOML shape from memory again.
 
-Neolink binds LOCALHOST ONLY, on an internal-only port — see restream_gen.py for why:
-go2rtc is the sole client that ever connects to it, and go2rtc republishes to the
-outside world (Frigate, VLC, etc.) on the public port this add-on has always used.
+Neolink binds on an internal, non-public port — see restream_gen.py for why: go2rtc
+is meant to be the sole real client, republishing to the outside world (Frigate,
+VLC, etc.) on the public port this add-on has always used.
+
+TEMPORARY: bind address reverted to 0.0.0.0 (was 127.0.0.1). With loopback-only
+binding, BOTH go2rtc's client (which never sends OPTIONS before DESCRIBE) AND this
+add-on's own OPTIONS-first probe got an identical, persistent "RTSP/1.0 404 Not
+Found" on DESCRIBE — reproduced across multiple restart cycles and minutes of a
+stable run, ruling out a startup race and ruling out any client-side protocol
+difference. Neolink's own permission/role source (gst/factory.rs, gst/server.rs)
+was checked directly and looks internally consistent for anonymous access with no
+configured users, so no obvious code bug was found there either. 0.0.0.0 is the
+one remaining variable that has ever actually been proven to work (weeks of VLC
+and Frigate access on the old public bind); reverting it here, on the still-
+internal port 18554 (unknown to Frigate, not exposed as an add-on port), isolates
+whether loopback binding itself is what broke this. If this fixes it, the
+"internal-only" protection is weaker (0.0.0.0:18554 is technically reachable from
+the LAN, not just this container) but the port is still non-public/undocumented,
+which is a reasonable interim trade-off over a completely non-functional stream.
 """
 from __future__ import annotations
 
@@ -28,10 +44,9 @@ from .store import Camera
 log = logging.getLogger("aio-neolink.config_gen")
 
 NEOLINK_CONFIG = Path(os.environ.get("NEOLINK_CONFIG", "/data/neolink.toml"))
-# Internal-only: go2rtc is the only thing that ever connects here. Deliberately far
-# from go2rtc's own default ports (1984 API, 8554 RTSP, 8555 WebRTC) to avoid any
-# collision with them.
-RTSP_BIND_ADDR = os.environ.get("NEOLINK_RTSP_BIND_ADDR", "127.0.0.1")
+# go2rtc is meant to be the only real client. Port deliberately far from go2rtc's
+# own default ports (1984 API, 8554 RTSP, 8555 WebRTC) to avoid any collision.
+RTSP_BIND_ADDR = os.environ.get("NEOLINK_RTSP_BIND_ADDR", "0.0.0.0")
 RTSP_PORT = int(os.environ.get("NEOLINK_RTSP_PORT", "18554"))
 
 
