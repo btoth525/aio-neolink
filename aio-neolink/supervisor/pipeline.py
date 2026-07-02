@@ -108,6 +108,17 @@ class CameraHealth:
     last_error: str = ""
     healthy: bool = False
     ever_connected: bool = False  # has this camera EVER completed a handshake since it was added?
+    # Fresh-probe state — verifies NEW clients can still join, not just that our
+    # long-lived session keeps receiving. Discovered live (2026-07-01 18:38): after a
+    # camera-side ping timeout, Neolink reconnected to the camera and kept feeding
+    # its EXISTING RTSP sessions (so the persistent monitor stayed 100% healthy),
+    # but every NEW client connection failed ("Failed to send to source: App source
+    # is closed") — Frigate sat unavailable for 40+ minutes while the watchdog saw
+    # nothing wrong. A periodic short-lived OPTIONS+DESCRIBE probe catches exactly
+    # that zombie state.
+    fresh_probe_ok_at: float = 0.0        # monotonic time of the last successful fresh probe
+    fresh_probe_failing_since: float = 0.0  # monotonic time the current failure streak started (0 = not failing)
+    fresh_probe_error: str = ""
 
 
 @dataclass
@@ -159,24 +170,30 @@ class _CameraMonitor:
     has.
     """
 
-    def __init__(self, host: str, port: int, stream_name: str, health: CameraHealth) -> None:
+    def __init__(self, host: str, port: int, stream_name: str, health: CameraHealth,
+                 probe_interval: float = 60.0) -> None:
         self.host = host
         self.port = port
         self.stream_name = stream_name
         self.health = health
+        self.probe_interval = probe_interval
         self._task: Optional[asyncio.Task] = None
+        self._probe_task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
+        self._probe_task = asyncio.create_task(self._probe_loop())
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        for attr in ("_task", "_probe_task"):
+            task = getattr(self, attr)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                setattr(self, attr, None)
 
     async def _run(self) -> None:
         while True:
@@ -211,6 +228,76 @@ class _CameraMonitor:
                 if not chunk:
                     raise ConnectionError("connection closed")
                 self.health.last_byte_at = time.monotonic()
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _probe_loop(self) -> None:
+        """Periodically verify a brand-NEW client can still join the stream.
+
+        The persistent session above proves data is flowing to EXISTING clients;
+        it says nothing about whether Neolink will accept a new one. Confirmed
+        live: after a camera-side ping timeout, Neolink kept serving old sessions
+        while rejecting every new DESCRIBE ("App source is closed") — Frigate
+        stayed down for 40+ minutes with the watchdog reporting healthy. This
+        loop opens a short-lived connection doing OPTIONS + DESCRIBE only (no
+        SETUP/PLAY, closed immediately), the same first steps Frigate performs
+        on reconnect. Deliberately skipped until the camera has connected once:
+        during Neolink's initial learning phase a DESCRIBE 404 is normal and
+        already governed by first_connect_timeout.
+
+        Concurrency note: this is a second, transient client alongside the
+        persistent one. Two simultaneous clients (Frigate + watchdog) are proven
+        stable on the shipping baked-in binary (see CLAUDE.md §7, v0.1.25) — the
+        historical "one client only" limit was a symptom of the regressed CI
+        binary, not this one.
+        """
+        while True:
+            await asyncio.sleep(self.probe_interval)
+            if not self.health.ever_connected:
+                continue
+            try:
+                await asyncio.wait_for(self._fresh_probe(), timeout=10.0)
+                self.health.fresh_probe_ok_at = time.monotonic()
+                self.health.fresh_probe_failing_since = 0.0
+                self.health.fresh_probe_error = ""
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if not self.health.fresh_probe_failing_since:
+                    self.health.fresh_probe_failing_since = time.monotonic()
+                self.health.fresh_probe_error = str(exc)
+
+    async def _fresh_probe(self) -> None:
+        """One short-lived OPTIONS + DESCRIBE against the stream, then disconnect."""
+        url = f"rtsp://{self.host}:{self.port}/{self.stream_name}"
+        reader, writer = await asyncio.open_connection(self.host, self.port)
+        try:
+            async def _roundtrip(request: str) -> str:
+                writer.write(request.encode())
+                await writer.drain()
+                buf = bytearray()
+                while b"\r\n\r\n" not in buf:
+                    chunk = await reader.read(4096)
+                    if not chunk:
+                        raise ConnectionError("connection closed during fresh probe")
+                    buf.extend(chunk)
+                return bytes(buf).decode(errors="replace")
+
+            resp = await _roundtrip(
+                f"OPTIONS {url} RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: aio-neolink-probe\r\n\r\n"
+            )
+            if "RTSP/1.0 200" not in resp:
+                raise RuntimeError(f"fresh OPTIONS failed: {resp[:100]}")
+            resp = await _roundtrip(
+                f"DESCRIBE {url} RTSP/1.0\r\nCSeq: 2\r\n"
+                "Accept: application/sdp\r\nUser-Agent: aio-neolink-probe\r\n\r\n"
+            )
+            if "RTSP/1.0 200" not in resp:
+                raise RuntimeError(f"fresh DESCRIBE failed: {resp[:100]}")
         finally:
             try:
                 writer.close()
@@ -404,7 +491,13 @@ class PipelineManager:
             # Frigate uses — not Neolink directly. Neolink must only ever have
             # go2rtc as a client (see restream_gen.py for why).
             health = self._health.setdefault(cam.name, CameraHealth(camera_name=cam.name))
-            monitor = _CameraMonitor(self.opts.rtsp_host, self.opts.rtsp_port, cam.name, health)
+            monitor = _CameraMonitor(
+                self.opts.rtsp_host, self.opts.rtsp_port, cam.name, health,
+                # Fresh new-client probe every 2x health_interval (60s at defaults) —
+                # frequent enough to trip the watchdog_timeout window after a few
+                # misses, infrequent enough to be negligible load.
+                probe_interval=self.opts.health_interval * 2,
+            )
             monitor.start()
             self._monitors[cam.name] = monitor
 
@@ -516,6 +609,23 @@ class PipelineManager:
 
             silent_for = now - h.last_byte_at if h.last_byte_at else now - self._last_restart
             if h.connected and silent_for < self.opts.watchdog_timeout:
+                # Persistent session looks fine — but also require that NEW clients
+                # can still join (see _probe_loop): a Neolink that keeps feeding old
+                # sessions while rejecting fresh DESCRIBEs strands Frigate on any
+                # reconnect, invisibly. Sustained fresh-probe failure past the same
+                # watchdog_timeout window → treat as unhealthy despite flowing data.
+                probe_failing_for = (
+                    now - h.fresh_probe_failing_since if h.fresh_probe_failing_since else 0.0
+                )
+                if probe_failing_for >= self.opts.watchdog_timeout:
+                    h.healthy = False
+                    log.warning(
+                        "camera %s: persistent session still receiving data, but new-client "
+                        "probe has failed for %.0fs (%s) — zombie RTSP state, restarting",
+                        cam.name, probe_failing_for, h.fresh_probe_error,
+                    )
+                    unhealthy.append(cam.name)
+                    continue
                 h.healthy = True
                 continue
 
@@ -551,6 +661,8 @@ class PipelineManager:
                 "connected": h.connected,
                 "seconds_since_ok": (now - h.last_byte_at) if h.last_byte_at else None,
                 "last_error": h.last_error,
+                "new_client_probe_ok": not h.fresh_probe_failing_since,
+                "new_client_probe_error": h.fresh_probe_error,
             }
             for name, h in self._health.items()
         }

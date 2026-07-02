@@ -332,6 +332,25 @@ Combine reolink-aio + Neolink's audio backchannel; surface a talk button in the 
   actually runs in the proven environment, not by what the label says matches;
   (b) when replicating a working system, replicate its *shape* first (binary,
   port, topology) before theorizing about deeper causes.
+- **v0.1.26 — the zombie-RTSP gap, found live the same day v0.1.25 shipped.**
+  At 18:38 the camera dropped its Baichuan connection ("Timed out waiting for
+  camera ping reply"); Neolink auto-reconnected to the camera in 50ms and kept
+  feeding its EXISTING RTSP sessions — the watchdog's persistent connection
+  stayed 100% healthy — but every NEW client connection failed from then on
+  ("Failed to send to source: App source is closed"). Frigate, which had
+  dropped alongside the camera blip, could never rejoin: `camera.movie_room`
+  sat unavailable 40+ minutes with the watchdog reporting healthy, and only a
+  manual add-on restart fixed it. Fix: `_CameraMonitor` now runs a second,
+  short-lived **fresh probe** (OPTIONS+DESCRIBE only, no SETUP/PLAY, closed
+  immediately) every `2*health_interval`, verifying new clients can still
+  join; sustained fresh-probe failure past `watchdog_timeout` restarts Neolink
+  even while the persistent session is happily receiving data. The probe skips
+  until `ever_connected` (learning-phase 404s are normal and governed by
+  `first_connect_timeout`). Exposed in `/api/health` as `new_client_probe_ok` /
+  `new_client_probe_error`. **Lesson: "data is flowing to me" and "the server
+  can accept clients" are independent failure axes — a watchdog must test the
+  reconnect path, not just the steady-state path, because the consumer that
+  matters (Frigate) reconnects through the front door.**
 - **Licensing:** Neolink is GPL-3.0. Keep this repo GPL-3.0-compatible.
 - **Placeholders:** all replaced with the real owner (`btoth525`) across `config.yaml`,
   `repository.yaml`, `build.yaml`, and `README.md`. Nothing left to fill in.
